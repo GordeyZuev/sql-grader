@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>SQL Trainer</title>
+    <script>document.documentElement.dataset.theme=localStorage.getItem('cabinet_theme')||'light';</script>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="#home" aria-label="SQL Trainer – на главную"><span class="brand-copy">SQL Trainer</span></a>
+      <div class="top-actions">
+        <div id="userbar"></div>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Переключить тему" title="Переключить тему"></button>
+      </div>
+    </header>
+    <main id="app"></main>
+    <footer class="site-footer">
+      <span class="footer-brand">SQL Trainer</span>
+    </footer>
+    <script src="/static/markdown.js" defer></script>
+    <script src="/static/sql-editor.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

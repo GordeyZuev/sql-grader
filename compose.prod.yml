@@ -1,0 +1,81 @@
+services:
+  cabinet:
+    image: sql-trainer:local
+    build: .
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: ../.env
+    environment:
+      CABINET_DB_PATH: /data/cabinet.sqlite3
+      CABINET_MANIFEST: /data/manifest.json
+      FORWARDED_ALLOW_IPS: 172.30.0.2
+      HOME: /tmp
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    expose:
+      - "8000"
+    volumes:
+      - /srv/sql-trainer/data:/data
+    networks:
+      app:
+        ipv4_address: 172.30.0.3
+
+  backup:
+    image: sql-trainer:local
+    build: .
+    user: "10001:10001"
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CABINET_DB_PATH: /data/cabinet.sqlite3
+      CABINET_BACKUP_DIR: /backups
+      HOME: /tmp
+    command: ["python", "-m", "cabinet.backup", "--loop"]
+    volumes:
+      - /srv/sql-trainer/data:/data
+      - /srv/sql-trainer/backups:/backups
+
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      - cabinet
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/sql-trainer/caddy-data:/data
+      - /srv/sql-trainer/caddy-config:/config
+    networks:
+      app:
+        ipv4_address: 172.30.0.2
+
+networks:
+  app:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "timezone": "Europe/Moscow",
+  "hard_deadline": "2026-10-10T23:59:00+03:00",
+  "penalty": {
+    "formula": "score * multiplier ** (late_days / period_days)",
+    "period_days": 7,
+    "period_multiplier": 0.8,
+    "minimum_score_fraction": 0.6,
+    "max_penalty_fraction": 0.4,
+    "round_digits": 2,
+    "rounding_mode": "half_up"
+  },
+  "homeworks": [
+    {
+      "id": "hw1",
+      "title": "ДЗ 1. SELECT и фильтрация",
+      "order": 1,
+      "soft_deadline": "2026-09-25T23:59:00+03:00",
+      "tasks": [
+        {
+          "id": "Q01",
+          "title": "Все самолёты",
+          "statement": "Выведите все столбцы таблицы airplanes, отсортировав результат по airplane_code.",
+          "points": 1,
+          "required": [],
+          "hints": ["Проверьте порядок сортировки."],
+          "reference_sql": "SELECT airplane_code, model, range, speed FROM airplanes ORDER BY airplane_code"
+        }
+      ]
+    }
+  ]
+}

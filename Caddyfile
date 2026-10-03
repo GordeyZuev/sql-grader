@@ -1,0 +1,13 @@
+hse-ai-sql.ru {
+    encode zstd gzip
+    request_body {
+        max_size 25MB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-Frame-Options "DENY"
+    }
+    reverse_proxy cabinet:8000
+}
