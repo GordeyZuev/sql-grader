@@ -791,11 +791,6 @@ def evaluate_task(hw_id: str, task, version: int | None, sql: str):
 def run_recheck_job(job_id: int, actor: str, manifest, version: int, candidates: list[dict]):
     homework_index = {hw.id: hw for hw in manifest.homeworks}
     task_index = {hw.id: {task.id: task for task in hw.tasks} for hw in manifest.homeworks}
-    with store.transaction() as db:
-        db.execute(
-            "UPDATE recheck_jobs SET status='running',updated_at=? WHERE id=?",
-            (store.now_iso(), job_id),
-        )
 
     def check(candidate):
         hw_id, task_id = candidate["homework"], candidate["task"]
@@ -825,6 +820,11 @@ def run_recheck_job(job_id: int, actor: str, manifest, version: int, candidates:
         return
     completed = 0
     try:
+        with store.transaction() as db:
+            db.execute(
+                "UPDATE recheck_jobs SET status='running',updated_at=? WHERE id=?",
+                (store.now_iso(), job_id),
+            )
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cabinet-recheck") as pool:
             futures = [pool.submit(check, row) for row in candidates]
             for future in as_completed(futures):

@@ -91,6 +91,51 @@ async function api(path, options = {}) {
   return body;
 }
 
+let scrollLocks = 0;
+let confirmReturn = null;
+let confirmWait = null;
+
+function setScrollLock(locked) {
+  scrollLocks += locked ? 1 : -1;
+  if (scrollLocks < 0) scrollLocks = 0;
+  document.body.style.overflow = scrollLocks ? 'hidden' : '';
+}
+
+function confirmDialog() {
+  let dialog = document.querySelector('#confirm-dialog');
+  if (dialog) return dialog;
+  dialog = document.createElement('dialog');
+  dialog.id = 'confirm-dialog';
+  dialog.className = 'confirm-dialog';
+  dialog.innerHTML = '<form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="confirm-actions"><button type="submit" class="secondary" value="cancel">Отмена</button><button type="submit" id="confirm-accept" value="ok"></button></div></form>';
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close('cancel');
+  });
+  dialog.addEventListener('close', () => {
+    setScrollLock(false);
+    if (confirmReturn?.isConnected) confirmReturn.focus();
+    confirmReturn = null;
+    const resolve = confirmWait;
+    confirmWait = null;
+    resolve?.(dialog.returnValue === 'ok');
+  });
+  document.body.appendChild(dialog);
+  return dialog;
+}
+
+function askConfirm({ title, text, confirmLabel, destructive = false }) {
+  const dialog = confirmDialog();
+  const accept = dialog.querySelector('#confirm-accept');
+  dialog.querySelector('#confirm-title').textContent = title;
+  dialog.querySelector('#confirm-text').textContent = text;
+  accept.textContent = confirmLabel;
+  accept.className = destructive ? 'destructive' : 'primary';
+  confirmReturn = document.activeElement;
+  setScrollLock(true);
+  dialog.showModal();
+  return new Promise((resolve) => { confirmWait = resolve; });
+}
+
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('cabinet_theme', theme);
@@ -255,7 +300,7 @@ async function renderUserbar(student = null) {
   const switcher = student.is_assistant || student.is_superadmin
     ? `<nav class="place-switch" aria-label="Разделы"><a href="#home" class="${onStudy ? 'active' : ''}" ${onStudy ? 'aria-current="page"' : ''}>Задания</a><a href="#admin" class="${onPanel ? 'active' : ''}" ${onPanel ? 'aria-current="page"' : ''}>Панель</a></nav>`
     : '';
-  userbar.innerHTML = `${switcher}<span class="user-identity">${escapeHtml(student.full_name)} <span>${escapeHtml(student.username)}</span></span><button class="secondary compact${onProfile ? ' is-current' : ''}" id="profile-edit" type="button">Профиль</button><button class="secondary compact" id="session-logout" type="button">Выйти</button>`;
+  userbar.innerHTML = `${switcher}<span class="user-identity">${escapeHtml(student.full_name)} <span>${escapeHtml(student.username)}</span></span><button class="secondary compact${onProfile ? ' is-current' : ''}" id="profile-edit" type="button"${onProfile ? ' aria-current="page"' : ''}>Профиль</button><button class="secondary compact" id="session-logout" type="button">Выйти</button>`;
   document.querySelector('#profile-edit').addEventListener('click', () => { location.hash = '#profile'; });
   document.querySelector('#session-logout').addEventListener('click', logoutStudent);
   return student;
@@ -471,8 +516,7 @@ async function renderHome() {
 
     app.innerHTML = `
       <div class="page-shell home-page">
-        <section class="home-hero"><h1>Мои задания</h1></section>
-        <button type="button" class="sandbox-launch" id="sandbox-open"><span class="sandbox-title">Песочница SQL</span><span class="sandbox-open-label">Открыть</span></button>
+        <section class="home-hero"><h1>Мои задания</h1><a class="secondary" href="#sandbox">Открыть песочницу</a></section>
         <div class="section-heading homework-list-heading"><h2>Домашние задания</h2><span class="home-total-score">Баллы за курс <strong class="${scoreTone(totalScore, maxScore)}">${formatPoints(totalScore)} / ${formatPoints(maxScore)}</strong></span></div>
         <section class="homework-grid">${homeworks.map((homework) => {
           const status = homeworkStatus(homework);
@@ -484,10 +528,70 @@ async function renderHome() {
           return `<a class="homework-tile ${tileClass}" href="#homework/${encodeURIComponent(homework.id)}"><div class="homework-tile-heading"><span class="eyebrow">${escapeHtml(homework.id.toUpperCase())}</span><h3>${escapeHtml(homework.title)}</h3><span class="homework-tile-score">Баллы <strong class="${scoreClass}">${formatPoints(homework.score)} / ${formatPoints(homework.max_points)}</strong></span></div><div class="homework-tile-deadlines"><span>Мягкий срок <strong>${formatDate(homework.soft_deadline)}</strong></span><span>Жёсткий срок <strong>${formatDate(homework.hard_deadline)}</strong></span></div><div class="homework-tile-progress"><div class="progress-track ${toneClass}"><span style="width:${percent}%"></span></div><span>${status.complete} из ${homework.tasks.length} задач</span></div></a>`;
         }).join('')}</section>
       </div>`;
-    document.querySelector('#sandbox-open').addEventListener('click', () => { location.hash = '#sandbox'; });
   } catch (error) {
-    app.innerHTML = `<div class="page-shell"><section class="card-surface"><h1>Курса ещё нет</h1><p class="muted">${escapeHtml(error.message)}</p><p class="muted">Когда администратор опубликует курс, задания появятся здесь.</p></section></div>`;
+    renderHomeUnavailable(error);
   }
+}
+
+function plainLoadError(error) {
+  if (error.status === 503) return 'Курс ещё не опубликован. Задания появятся после публикации.';
+  return error.message;
+}
+
+function studentErrorPage(title, error, buttonId, buttonLabel) {
+  app.innerHTML = `
+    <div class="page-shell">
+      <section class="error-panel">
+        <p class="eyebrow">НЕ ОТКРЫЛОСЬ</p>
+        <h1>${escapeHtml(title)}</h1>
+        <p>${escapeHtml(plainLoadError(error))}</p>
+        <div class="state-actions">
+          <button type="button" class="primary" id="error-retry">Повторить</button>
+          <button type="button" class="secondary" id="${buttonId}">${escapeHtml(buttonLabel)}</button>
+        </div>
+      </section>
+    </div>`;
+  document.querySelector('#error-retry').addEventListener('click', () => route());
+}
+
+function showAdminError(target, title, error) {
+  target.innerHTML = `<section class="admin-section card-surface admin-error"><p class="eyebrow">НЕ ОТКРЫЛОСЬ</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(plainLoadError(error))}</p><button type="button" class="primary" id="admin-retry">Повторить</button></section>`;
+  target.querySelector('#admin-retry').addEventListener('click', () => renderAdminApp());
+}
+
+function listError(target, message, onRetry) {
+  target.innerHTML = `<div class="admin-error"><p>${escapeHtml(message)}</p><button type="button" class="secondary">Повторить</button></div>`;
+  target.querySelector('button').addEventListener('click', onRetry);
+}
+
+function loadingPanel(title) {
+  return `<section class="admin-section card-surface" aria-busy="true"><div class="section-heading"><h2>${escapeHtml(title)}</h2></div><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></section>`;
+}
+
+function renderHomeUnavailable(error) {
+  const unpublished = error.status === 503;
+  const canPublish = Boolean(currentUser?.is_superadmin);
+  const title = unpublished ? 'Заданий ещё нет' : 'Не удалось открыть задания';
+  const text = unpublished
+    ? (canPublish
+      ? 'Курса в базе ещё нет. Откройте в панели вкладку «Курс», вставьте JSON или выберите файл, затем проверьте и опубликуйте. После этого задания появятся здесь.'
+      : 'Курс ещё не опубликован. Когда администратор это сделает, домашние задания появятся на этом месте.')
+    : error.message;
+  const action = unpublished && canPublish
+    ? '<a class="primary" href="#admin/course">Открыть вкладку «Курс»</a>'
+    : (unpublished ? '' : '<button type="button" class="primary" id="home-retry">Повторить</button>');
+  app.innerHTML = `
+    <div class="page-shell home-page">
+      <section class="home-hero"><div><p class="eyebrow">КАБИНЕТ</p><h1>Мои задания</h1></div><a class="secondary" href="#sandbox">Открыть песочницу</a></section>
+      <div class="section-heading homework-list-heading"><h2>Домашние задания</h2></div>
+      <section class="course-empty">
+        <p class="eyebrow">ПОКА ПУСТО</p>
+        <h2>${escapeHtml(title)}</h2>
+        <p>${escapeHtml(text)}</p>
+        ${action}
+      </section>
+    </div>`;
+  document.querySelector('#home-retry')?.addEventListener('click', () => route());
 }
 
 async function renderProfile(student = null) {
@@ -509,7 +613,7 @@ async function renderProfile(student = null) {
           ].map(([id, name, label, autocomplete, minimum]) => `<label class="field">${label}<div class="password-control"><input id="${id}" name="${name}" type="password" required minlength="${minimum}" autocomplete="${autocomplete}"><button class="password-toggle" type="button" data-target="${id}" aria-label="Показать пароль" title="Показать пароль"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div>${name === 'new_password' ? '<span class="field-hint">Не менее 8 символов</span>' : ''}</label>`).join('')}
           <button class="primary">Изменить пароль</button>
         </form>
-        <div class="profile-divider"></div><button type="button" class="secondary profile-logout" id="profile-logout">Выйти из аккаунта</button><div id="profile-notice" class="notice" role="status"></div>
+        <div class="profile-divider"></div><button type="button" class="secondary profile-logout" id="profile-logout">Выйти</button><div id="profile-notice" class="notice" role="status"></div>
       </section>
     </div>`;
     bindPasswordToggles(app);
@@ -577,7 +681,7 @@ async function renderTask(homeworkId, taskId) {
           <section class="workbench-column"><div id="task-editor"></div></section>
           </div>
         </div>
-        <section class="attempts-section"><div class="section-heading"><h2>История запросов</h2><span class="section-count" id="task-history-count">0 записей</span></div><div class="attempt-list" id="task-history-list"><div class="empty-attempts">Загружаем историю…</div></div><button type="button" class="secondary history-more hidden" id="task-history-more">Загрузить предыдущие</button></section>
+        <section class="attempts-section"><div class="section-heading"><h2>История запросов</h2><span class="section-count" id="task-history-count">0 записей</span></div><div class="attempt-list" id="task-history-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span></div></div><button type="button" class="secondary history-more hidden" id="task-history-more">Загрузить предыдущие</button></section>
       </div>`;
 
     const editor = window.CabinetSQLEditor.mount(document.querySelector('#task-editor'), {
@@ -600,7 +704,7 @@ async function renderTask(homeworkId, taskId) {
     await loadTaskHistory(homeworkId, taskId, false);
     if (data.draft_saved_at) editor.setDraftStatus(`Черновик сохранён · ${formatDate(data.draft_saved_at)}`, 'saved');
   } catch (error) {
-    app.innerHTML = `<div class="page-shell"><div class="error-panel"><strong>Не удалось открыть задачу</strong><p>${escapeHtml(error.message)}</p><button class="secondary" id="error-back">К задачам ДЗ</button></div></div>`;
+    studentErrorPage('Не удалось открыть задачу', error, 'error-back', 'Вернуться к задачам');
     document.querySelector('#error-back').addEventListener('click', () => { location.hash = `#homework/${encodeURIComponent(homeworkId)}`; });
   }
 }
@@ -712,7 +816,7 @@ async function loadTaskHistory(homeworkId, taskId, append = true) {
       ? attemptMarkup({ ...item, points: item.points || '0', verdict: item.verdict || 'ERROR', message: item.attempt_message || item.message, query_status: item.status }, data.total - taskHistoryOffset - index, false, true)
       : runMarkup(item, data.total - taskHistoryOffset - index, true)).join('');
     if (append && taskHistoryOffset) list.insertAdjacentHTML('beforeend', markup);
-    else list.innerHTML = markup || '<div class="empty-attempts">Пока нет запросов.</div>';
+    else list.innerHTML = markup || '<div class="empty-attempts">Запросов пока нет. Запустите запрос, и он появится здесь.</div>';
     taskHistoryOffset += data.items.length;
     document.querySelector('#task-history-count').textContent = russianCount(data.total, ['запись', 'записи', 'записей']);
     document.querySelector('#task-history-more').classList.toggle('hidden', !data.has_more);
@@ -770,7 +874,7 @@ async function route() {
       if (!homework) throw new Error('Домашнее задание не найдено');
       renderHomework(homework);
     } catch (error) {
-      app.innerHTML = `<div class="page-shell"><div class="error-panel"><strong>Не удалось открыть ДЗ</strong><p>${escapeHtml(error.message)}</p><button class="secondary" id="error-back">Все задания</button></div></div>`;
+      studentErrorPage('Не удалось открыть домашнее задание', error, 'error-back', 'Вернуться к заданиям');
       document.querySelector('#error-back').addEventListener('click', returnToHome);
     }
   } else if (location.hash === '#sandbox' && token) {
@@ -813,12 +917,12 @@ async function loadSandboxHistory(editor) {
       restoreClass: 'restore-query',
       restoreLabel: 'Вернуть запрос в редактор',
       restoreAttrs: `data-index="${index}"`,
-    })}</details>`).join('')}</div>` : '<div class="empty-attempts">Здесь появятся последние 10 запросов из песочницы.</div>';
+    })}</details>`).join('')}</div>` : '<div class="empty-attempts">Запросов пока нет. Запустите запрос в редакторе выше.</div>';
     target.querySelectorAll('.restore-query').forEach((button) => {
       button.addEventListener('click', () => editor.setValue(rows[Number(button.dataset.index)].sql));
     });
   } catch (error) {
-    target.textContent = error.message;
+    listError(target, error.message, () => loadSandboxHistory(editor));
   }
 }
 
@@ -932,7 +1036,7 @@ async function renderAdminApp() {
 }
 
 async function renderAdminQueue(target) {
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Очередь</h2><span class="section-count" id="queue-count">…</span></div><p class="muted">Студенты, у которых уже есть проверка, а балл ещё не полный. Поиск находит любого студента, в том числе без попыток.</p><div class="admin-toolbar"><input id="queue-search" placeholder="Имя или логин"></div><div id="queue-list">Загружаем…</div></section>`;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Очередь</h2><span class="section-count" id="queue-count">…</span></div><p class="muted">Студенты, у которых уже есть проверка, а балл ещё не полный. Поиск находит любого студента, в том числе без попыток.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="queue-search" placeholder="Например, ivan_26"></label></div><div id="queue-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></div></section>`;
   document.querySelector('#queue-search').addEventListener('input', paintQueue);
   try {
     queueStudents = await adminApi('/api/admin/students?sort=name');
@@ -961,7 +1065,7 @@ function paintQueue() {
 }
 
 async function renderAdminStudent(target, studentId) {
-  target.innerHTML = '<section class="admin-section card-surface"><p class="muted">Загружаем карточку…</p></section>';
+  target.innerHTML = loadingPanel('Карточка');
   try {
     const detail = await adminApi(`/api/admin/students/${studentId}`);
     const student = detail.student;
@@ -972,12 +1076,12 @@ async function renderAdminStudent(target, studentId) {
     document.querySelector('#reset-student-password').addEventListener('click', () => resetStudentPassword(studentId, student.username));
     target.querySelectorAll('.deadline-form').forEach((form) => form.addEventListener('submit', overrideDeadline));
   } catch (error) {
-    target.innerHTML = `<section class="admin-section card-surface"><p>${escapeHtml(error.message)}</p></section>`;
+    showAdminError(target, 'Не удалось открыть карточку', error);
   }
 }
 
 async function renderAdminTask(target, routeInfo) {
-  target.innerHTML = '<section class="admin-section card-surface"><p class="muted">Загружаем задачу…</p></section>';
+  target.innerHTML = loadingPanel('Задача');
   try {
     const detail = await adminApi(`/api/admin/students/${routeInfo.studentId}`);
     const student = detail.student;
@@ -985,7 +1089,7 @@ async function renderAdminTask(target, routeInfo) {
     const task = homework ? Object.values(homework.tasks).find((item) => item.id === routeInfo.task) : null;
     if (!task) throw new Error('Задача не найдена');
     const tone = scoreTone(task.score, task.max_points);
-    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="#admin">Очередь</a><span>/</span><a href="#admin/student/${routeInfo.studentId}">${escapeHtml(student.full_name)}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2><strong class="score-figure ${tone}">${formatPoints(task.score || 0)} / ${formatPoints(task.max_points || 0)}</strong></div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="secondary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
+    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="#admin">Очередь</a><span>/</span><a href="#admin/student/${routeInfo.studentId}">${escapeHtml(student.full_name)}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2><strong class="score-figure ${tone}">${formatPoints(task.score || 0)} / ${formatPoints(task.max_points || 0)}</strong></div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="primary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
     document.querySelector('#task-grade-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -1000,12 +1104,18 @@ async function renderAdminTask(target, routeInfo) {
       }
     });
   } catch (error) {
-    target.innerHTML = `<section class="admin-section card-surface"><p>${escapeHtml(error.message)}</p></section>`;
+    showAdminError(target, 'Не удалось открыть задачу', error);
   }
 }
 
 async function resetStudentPassword(studentId, username) {
-  if (!confirm(`Создать новый пароль для ${username}? Текущие сессии завершатся.`)) return;
+  const accepted = await askConfirm({
+    title: `Сбросить пароль для ${username}?`,
+    text: 'Будет создан новый пароль. Текущие сессии этой учётной записи завершатся.',
+    confirmLabel: 'Сбросить пароль',
+    destructive: true,
+  });
+  if (!accepted) return;
   const result = await adminApi(`/api/admin/students/${studentId}/reset-password`, { method: 'POST' });
   const box = document.querySelector('#temporary-password');
   box.innerHTML = `<label class="field">Новый временный пароль<input readonly value="${escapeHtml(result.temporary_password)}"></label><button type="button" class="secondary" id="copy-temp-password">Копировать пароль</button><span role="status"></span>`;
@@ -1027,27 +1137,27 @@ function homeworkSelectMarkup(manifest, id, includeAll = false) {
 }
 
 async function renderAdminExport(target) {
-  target.innerHTML = '<section class="admin-section card-surface"><p class="muted">Загружаем список домашних заданий…</p></section>';
+  target.innerHTML = loadingPanel('Выгрузки');
   try {
     const manifestData = await adminApi('/api/admin/manifest');
-    target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Выгрузки</h2></div><p class="muted">Полная ведомость: логин, имя, балл по каждой задаче и сумма для одного домашнего задания.</p><form class="admin-inline" id="export-form"><label class="field">Домашнее задание${homeworkSelectMarkup(manifestData.manifest, 'export-hw')}</label><button class="secondary" type="submit">Скачать ведомость</button></form><div class="admin-actions export-all"><button id="export-course" class="secondary" type="button">Выгрузить всё</button><span class="muted">Два файла: ведомость всего курса и журнал всех проверок.</span></div><p id="admin-message" class="notice" role="status"></p></section>`;
+    target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Выгрузки</h2></div><p class="muted">Полная ведомость: логин, имя, балл по каждой задаче и сумма для одного домашнего задания.</p><form class="admin-inline" id="export-form"><label class="field">Домашнее задание${homeworkSelectMarkup(manifestData.manifest, 'export-hw')}</label><button class="primary" type="submit">Скачать ведомость</button></form><div class="admin-actions export-all"><button id="export-course" class="secondary" type="button">Выгрузить всё</button><span class="muted">Два файла: ведомость всего курса и журнал всех проверок.</span></div><p id="admin-message" class="notice" role="status"></p></section>`;
     document.querySelector('#export-form').addEventListener('submit', (event) => {
       event.preventDefault();
       downloadCsv('results');
     });
     document.querySelector('#export-course').addEventListener('click', downloadCourseBundle);
   } catch (error) {
-    target.innerHTML = `<section class="admin-section card-surface"><p>${escapeHtml(error.message)}</p></section>`;
+    showAdminError(target, 'Не удалось открыть выгрузки', error);
   }
 }
 
 async function renderAdminCourse(target) {
-  target.innerHTML = '<section class="admin-section card-surface"><p class="muted">Загружаем курс…</p></section>';
+  target.innerHTML = loadingPanel('Курс');
   let manifestData;
   try {
     manifestData = await adminApi('/api/admin/manifest');
   } catch (error) {
-    target.innerHTML = `<section class="admin-section card-surface"><p>${escapeHtml(error.message)}</p></section>`;
+    showAdminError(target, 'Не удалось открыть курс', error);
     return;
   }
   const empty = !manifestData.manifest;
@@ -1058,17 +1168,17 @@ async function renderAdminCourse(target) {
       ? `Версия ${manifestData.version}`
       : 'Файл на диске';
   const lead = empty
-    ? 'Файла курса на диске нет, и в базе ещё нет опубликованной версии. Вставьте JSON в поле ниже или выберите файл. Затем нажмите «Проверить манифест» и «Опубликовать версию». После публикации задания хранятся в базе кабинета.'
+    ? 'Файла курса на диске нет, и в базе ещё нет опубликованной версии. Вставьте JSON в поле ниже или выберите файл. Затем нажмите «Проверить курс» и «Опубликовать версию». После публикации задания хранятся в базе кабинета.'
     : 'Задания, сроки и правильные ответы. Правка остаётся в JSON. Публикация проверяет правильные ответы и фиксирует новую версию.';
   const loaded = empty
-    ? 'Курса пока нет. Вставьте JSON или выберите файл, затем проверьте манифест.'
+    ? 'Курса пока нет. Вставьте JSON или выберите файл, затем проверьте курс.'
     : manifestData.source === 'published'
       ? 'Загружена опубликованная версия.'
       : 'Загружен файл курса с диска. В базе эта версия ещё не опубликована.';
   const recheck = homeworks.length
-    ? `<section class="admin-section card-surface"><h3>Перепроверить решения</h3><p class="muted">После изменения правильного ответа заново считает баллы по сохранённым запросам.</p><form class="admin-inline" id="recheck-form"><label class="field">Домашнее задание${homeworkSelectMarkup(manifestData.manifest, 'recheck-hw', true)}</label><button class="secondary" type="submit">Начать</button></form><p id="recheck-progress" class="notice"></p></section>`
+    ? `<section class="admin-section card-surface"><h3>Перепроверить решения</h3><p class="muted">После изменения правильного ответа заново считает баллы по сохранённым запросам.</p><form class="admin-inline" id="recheck-form"><label class="field">Домашнее задание${homeworkSelectMarkup(manifestData.manifest, 'recheck-hw', true)}</label><button class="secondary" type="submit">Начать перепроверку</button></form><p id="recheck-progress" class="notice"></p></section>`
     : '<section class="admin-section card-surface"><h3>Перепроверить решения</h3><p class="muted">Перепроверка появится после публикации курса.</p></section>';
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Курс</h2><span class="section-count">${status}</span></div><div class="admin-stack"><p class="muted">${lead}</p><label class="field file-picker">Файл курса, JSON или старый ZIP<span class="file-picker-row"><input id="manifest-file" type="file" accept=".json,.zip"><span class="secondary">Выбрать файл</span><span class="file-picker-name">файл не выбран</span></span></label><details class="admin-fold"><summary>Сроки, если загружаете старый ZIP</summary><div class="admin-deadline-inputs"><label class="field">Мягкий срок<input id="zip-soft" type="datetime-local" value="2026-09-25T23:59"></label><label class="field">Жёсткий срок<input id="zip-hard" type="datetime-local" value="2026-10-10T23:59"></label></div><p class="muted">Для JSON эти сроки не нужны: они уже внутри файла.</p></details><textarea id="manifest-json" class="admin-json-editor" spellcheck="false" aria-label="JSON манифест" placeholder="Вставьте сюда JSON курса"></textarea><div class="admin-actions"><button id="manifest-preview" class="secondary" type="button">Проверить манифест</button><button id="manifest-publish" class="primary" type="button" disabled>Опубликовать версию</button></div><p id="manifest-result" class="admin-status">${loaded}</p></div></section>${recheck}`;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Курс</h2><span class="section-count">${status}</span></div><div class="admin-stack"><p class="muted">${lead}</p><label class="field file-picker">Файл курса, JSON или старый ZIP<span class="file-picker-row"><input id="manifest-file" type="file" accept=".json,.zip"><span class="secondary">Выбрать файл</span><span class="file-picker-name">файл не выбран</span></span></label><details class="admin-fold"><summary>Сроки, если загружаете старый ZIP</summary><div class="admin-deadline-inputs"><label class="field">Мягкий срок<input id="zip-soft" type="datetime-local" value="2026-09-25T23:59"></label><label class="field">Жёсткий срок<input id="zip-hard" type="datetime-local" value="2026-10-10T23:59"></label></div><p class="muted">Для JSON эти сроки не нужны: они уже внутри файла.</p></details><textarea id="manifest-json" class="admin-json-editor" spellcheck="false" aria-label="JSON курса" placeholder="Вставьте сюда JSON курса"></textarea><div class="admin-actions"><button id="manifest-preview" class="secondary" type="button">Проверить курс</button><button id="manifest-publish" class="primary" type="button" disabled>Опубликовать версию</button></div><p id="manifest-result" class="admin-status">${loaded}</p></div></section>${recheck}`;
   if (!empty) document.querySelector('#manifest-json').value = JSON.stringify(manifestData.manifest, null, 2);
   document.querySelector('#manifest-preview').addEventListener('click', previewManifest);
   document.querySelector('#manifest-publish').addEventListener('click', publishManifest);
@@ -1080,13 +1190,13 @@ async function renderAdminCourse(target) {
 }
 
 function renderAdminAudit(target) {
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Журнал действий</h2></div><div class="admin-toolbar"><input id="audit-actor" placeholder="Исполнитель"><select id="audit-action"><option value="">Все действия</option>${Object.entries(auditActionTitles).map(([key, title]) => `<option value="${escapeHtml(key)}">${escapeHtml(title)}</option>`).join('')}</select><button id="audit-refresh" class="secondary" type="button">Обновить</button></div><div id="audit-list"></div></section>`;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Журнал действий</h2></div><div class="admin-toolbar"><label class="field">Исполнитель<input id="audit-actor" placeholder="Логин"></label><label class="field">Действие<select id="audit-action"><option value="">Все действия</option>${Object.entries(auditActionTitles).map(([key, title]) => `<option value="${escapeHtml(key)}">${escapeHtml(title)}</option>`).join('')}</select></label><button id="audit-refresh" class="secondary" type="button">Обновить</button></div><div id="audit-list"></div></section>`;
   document.querySelector('#audit-refresh').addEventListener('click', () => loadAudit());
   loadAudit();
 }
 
 function renderAdminAccounts(target) {
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Права</h2></div><p class="muted">Одна учётка на человека. Ассистент проверяет очередь, ставит оценку и скачивает ведомость. Администратор ещё публикует курс, видит журнал и выдаёт права.</p><div class="admin-toolbar"><input id="role-search" placeholder="Имя или логин"></div><div id="admin-account-list">Загружаем…</div></section>`;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Права</h2></div><p class="muted">Одна учётка на человека. Ассистент проверяет очередь, ставит оценку и скачивает ведомость. Администратор ещё публикует курс, видит журнал и выдаёт права.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="role-search" placeholder="Например, ivan_26"></label></div><div id="admin-account-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span></div></div></section>`;
   document.querySelector('#role-search').addEventListener('input', paintRoles);
   loadRoles();
 }
@@ -1115,7 +1225,7 @@ async function readManifestFile(event) {
     } catch (error) { showManifestResult(error.message, false); }
   } else {
     document.querySelector('#manifest-json').value = await file.text();
-    showManifestResult('Файл подставлен в редактор. Сначала проверьте манифест.', false);
+    showManifestResult('Файл подставлен в редактор. Сначала проверьте курс.', false);
   }
   document.querySelector('#manifest-publish').disabled = true;
   window.manifestReady = false;
@@ -1180,12 +1290,12 @@ const auditActionTitles = {
   profile_update: 'Изменение профиля', password_change: 'Смена пароля',
   password_change_failed: 'Неудачная смена пароля', draft_saved: 'Сохранение черновика',
   registration_failed: 'Неудачная регистрация', task_check_rejected: 'Проверка отклонена',
-  manifest_publish_rejected: 'Публикация манифеста отклонена',
+  manifest_publish_rejected: 'Публикация курса отклонена',
   deadline_override_rejected: 'Снятие срока отклонено', manual_grade_rejected: 'Ручная оценка отклонена',
   query_run: 'Запуск SQL', task_checked: 'Проверка задания', achievement_created: 'Улучшение результата',
-  manifest_previewed: 'Предпросмотр манифеста', manifest_preview_rejected: 'Ошибка проверки манифеста',
+  manifest_previewed: 'Предпросмотр курса', manifest_preview_rejected: 'Ошибка проверки курса',
   legacy_zip_previewed: 'Предпросмотр ZIP-архива', legacy_zip_preview_rejected: 'Ошибка импорта ZIP-архива',
-  manifest_published: 'Публикация манифеста', csv_exported: 'Выгрузка CSV',
+  manifest_published: 'Публикация курса', csv_exported: 'Выгрузка CSV',
   student_password_reset: 'Сброс пароля студента',   admin_account_created: 'Создание учётной записи',
   admin_account_status_changed: 'Изменение статуса учётной записи',
   admin_password_reset: 'Новый пароль ассистента', recheck_started: 'Перепроверка запущена',
@@ -1263,7 +1373,7 @@ async function loadAudit(append = false) {
     const more = document.querySelector('#global-audit-more');
     more.classList.toggle('hidden', rows.length < 100);
     more.onclick = () => loadAudit(true);
-  } catch (error) { target.textContent = error.message; }
+  } catch (error) { listError(target, error.message, () => loadAudit(append)); }
 }
 
 let rolePeople = [];
@@ -1274,7 +1384,7 @@ async function loadRoles() {
   try {
     rolePeople = await adminApi('/api/admin/roles');
     paintRoles();
-  } catch (error) { target.textContent = error.message; }
+  } catch (error) { listError(target, error.message, () => loadRoles()); }
 }
 
 function paintRoles() {
@@ -1286,7 +1396,13 @@ function paintRoles() {
   target.querySelectorAll('.role-toggle').forEach((button) => button.addEventListener('click', async () => {
     const enabling = button.dataset.value === 'true';
     const title = button.dataset.flag === 'is_superadmin' ? 'администратора' : 'ассистента';
-    if (!confirm(`${enabling ? 'Включить' : 'Выключить'} права ${title}?`)) return;
+    const accepted = await askConfirm({
+      title: `${enabling ? 'Включить' : 'Выключить'} права ${title}?`,
+      text: enabling ? 'Учётная запись получит эти права.' : 'Учётная запись потеряет эти права.',
+      confirmLabel: `${enabling ? 'Включить' : 'Выключить'} права ${title}`,
+      destructive: !enabling,
+    });
+    if (!accepted) return;
     try {
       await adminApi(`/api/admin/students/${button.dataset.id}/role`, { method: 'PATCH', body: JSON.stringify({ [button.dataset.flag]: enabling }) });
       if (String(currentUser?.id) === String(button.dataset.id)) currentUser = { ...currentUser, [button.dataset.flag]: enabling };
@@ -1311,7 +1427,7 @@ async function studentDetail(studentId) {
     return;
   }
   row.classList.remove('hidden');
-  cell.textContent = 'Загружаем историю…';
+  cell.innerHTML = '<div class="skeleton-stack" aria-busy="true"><span></span><span></span></div>';
   try {
     const detail = await adminApi(`/api/admin/students/${studentId}`);
     const student = detail.student;
@@ -1333,7 +1449,13 @@ async function studentDetail(studentId) {
     });
     row.dataset.loaded = 'true';
     cell.querySelector('.reset-student-password').addEventListener('click', async () => {
-      if (!confirm(`Создать новый пароль для ${student.username}? Текущие сессии завершатся.`)) return;
+      const accepted = await askConfirm({
+        title: `Сбросить пароль для ${student.username}?`,
+        text: 'Будет создан новый пароль. Текущие сессии этой учётной записи завершатся.',
+        confirmLabel: 'Сбросить пароль',
+        destructive: true,
+      });
+      if (!accepted) return;
       const result = await adminApi(`/api/admin/students/${studentId}/reset-password`, { method: 'POST' });
       const target = document.querySelector(`#temporary-password-${studentId}`);
       target.innerHTML = `<label>Новый временный пароль<input readonly value="${escapeHtml(result.temporary_password)}"></label><button type="button" class="secondary copy-temp-password">Копировать пароль</button><span role="status"></span>`;

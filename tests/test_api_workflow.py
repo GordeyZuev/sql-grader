@@ -58,7 +58,7 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         assert "page-breadcrumb" in auth_ui and "Все задачи ДЗ" not in auth_ui
         assert "Лучший результат" not in auth_ui
         assert "Пишите запросы, запускайте их и сразу смотрите результат." not in auth_ui
-        assert "sandbox-launch" in auth_ui
+        assert "Открыть песочницу" in auth_ui and 'href="#sandbox"' in auth_ui
         assert client.get("/static/markdown.js").status_code == 200
         editor_ui = client.get("/static/sql-editor.js").text
         styles = client.get("/static/style.css").text
