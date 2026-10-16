@@ -53,7 +53,7 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         assert 'class="task-nav-row ${active ?' in auth_ui and "task-nav-state" in auth_ui
         assert ".task-nav-row.partial:not(.active)" in client.get("/static/style.css").text
         assert "/api/me/password" in auth_ui and "task-result-card" in auth_ui
-        assert "profile-logout" in auth_ui and "id=\"logout\"" not in auth_ui
+        assert "profile-logout" in auth_ui and 'id="logout"' not in auth_ui
         assert "Проверка доступна." not in auth_ui
         assert "page-breadcrumb" in auth_ui and "Все задачи ДЗ" not in auth_ui
         assert "Лучший результат" not in auth_ui
@@ -64,7 +64,7 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         styles = client.get("/static/style.css").text
         assert "data-gutter" in editor_ui and "data-format" in editor_ui
         assert "data-editor-mode" not in editor_ui and "editor-mode-switch" not in editor_ui
-        assert "psql-help" not in editor_ui and "<circle cx=\"12\" cy=\"12\" r=\"9\"" in editor_ui
+        assert "psql-help" not in editor_ui and '<circle cx="12" cy="12" r="9"' in editor_ui
         assert "⌨" not in editor_ui
         assert "Таблица результата. Прокручивайте" in auth_ui
         assert 'data-result-mode="pretty"' in editor_ui
@@ -111,10 +111,13 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         )
         assert throttled_user.status_code == 200
         for _ in range(10):
-            assert client.post(
-                "/api/auth/login",
-                json={"username": "throttle_26", "password": "wrong-password-123"},
-            ).status_code == 401
+            assert (
+                client.post(
+                    "/api/auth/login",
+                    json={"username": "throttle_26", "password": "wrong-password-123"},
+                ).status_code
+                == 401
+            )
         throttled_login = client.post(
             "/api/auth/login",
             json={"username": "throttle_26", "password": "wrong-password-123"},
@@ -189,11 +192,21 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         assert client.get("/api/admin/students", headers=helper_headers).status_code == 200
         assert client.get("/api/admin/audit", headers=helper_headers).status_code == 403
         assert client.get("/api/admin/manifest", headers=helper_headers).status_code == 403
-        assert client.post("/api/admin/publish", headers=helper_headers, json={"manifest": {}}).status_code == 403
+        assert (
+            client.post(
+                "/api/admin/publish", headers=helper_headers, json={"manifest": {}}
+            ).status_code
+            == 403
+        )
         assert client.post("/api/admin/recheck", headers=helper_headers).status_code == 403
         assert client.get("/api/me", headers=phrase_headers).json()["id"] == phrase_id
         assert client.get("/api/admin/audit", headers=assistant_headers).status_code == 403
-        assert client.post("/api/admin/publish", headers=assistant_headers, json={"manifest": {}}).status_code == 403
+        assert (
+            client.post(
+                "/api/admin/publish", headers=assistant_headers, json={"manifest": {}}
+            ).status_code
+            == 403
+        )
         assert client.post("/api/admin/recheck", headers=assistant_headers).status_code == 403
         assert (
             client.post(
@@ -202,19 +215,33 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
             ).status_code
             == 403
         )
-        assert client.post(
-            "/api/auth/register",
-            json={"username": "short_26", "full_name": "Short Password", "password": "1234567"},
-        ).status_code == 422
-        assert client.post(
-            "/api/auth/register",
-            json={"username": "eight_26", "full_name": "Eight Password", "password": "12345678"},
-        ).status_code == 200
-        assert client.get("/api/auth/username-availability", params={"username": "STUDENT_26"}).json() == {
+        assert (
+            client.post(
+                "/api/auth/register",
+                json={"username": "short_26", "full_name": "Short Password", "password": "1234567"},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/api/auth/register",
+                json={
+                    "username": "eight_26",
+                    "full_name": "Eight Password",
+                    "password": "12345678",
+                },
+            ).status_code
+            == 200
+        )
+        assert client.get(
+            "/api/auth/username-availability", params={"username": "STUDENT_26"}
+        ).json() == {
             "valid": True,
             "available": False,
         }
-        assert client.get("/api/auth/username-availability", params={"username": "new_user"}).json() == {
+        assert client.get(
+            "/api/auth/username-availability", params={"username": "new_user"}
+        ).json() == {
             "valid": True,
             "available": True,
         }
@@ -328,13 +355,21 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         assert len(task_state["runs"]) == 1
         assert task_state["runs"][0]["result"]["rows"] == [["1"]]
         assert task_state["score"] == "1"
+        assert task_state["final_score"] == "1"
+        assert first["final_score"] == "1"
+        listed = client.get("/api/homeworks", headers=student_headers).json()
+        assert listed[0]["score"] == "1"
+        assert listed[0]["final_score"] == "1"
+        assert listed[0]["tasks"][0]["final_score"] == "1"
         assert task_state["attempts"][0]["query_status"] == "ok"
         assert isinstance(task_state["attempts"][0]["elapsed_ms"], int)
         assert task_state["attempts"][0]["elapsed_ms"] >= 0
         assert task_state["attempts"][0]["row_count"] == 1
         assert task_state["attempts"][0]["result"]["columns"] == ["answer"]
         assert task_state["attempts"][0]["result"]["rows"] == [["2"]]
-        query_history = client.get(task_url + "/history?offset=0&limit=2", headers=student_headers).json()
+        query_history = client.get(
+            task_url + "/history?offset=0&limit=2", headers=student_headers
+        ).json()
         assert query_history["total"] == 4
         assert query_history["has_more"] is True
         assert [row["kind"] for row in query_history["items"]] == ["check", "check"]
@@ -342,7 +377,10 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
             task_url + "/history?offset=2&limit=2", headers=student_headers
         ).json()
         assert older_history["has_more"] is False
-        assert any(row["kind"] == "task" and row["result"]["rows"] == [["1"]] for row in older_history["items"])
+        assert any(
+            row["kind"] == "task" and row["result"]["rows"] == [["1"]]
+            for row in older_history["items"]
+        )
         assert client.get("/api/sandbox/history", headers=student_headers).json() == []
         sandbox_run = client.post(
             "/api/run", headers=student_headers, json={"sql": "SELECT 1 AS answer"}
@@ -361,7 +399,9 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         case_preserved = client.post(
             "/api/format",
             headers=student_headers,
-            json={"sql": "SELECT airplane_code, model, range FROM airplanes ORDER BY range, airplane_code"},
+            json={
+                "sql": "SELECT airplane_code, model, range FROM airplanes ORDER BY range, airplane_code"
+            },
         )
         assert case_preserved.status_code == 200
         assert "range" in case_preserved.json()["sql"]
@@ -458,9 +498,12 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         assert later_miss["score"] == "1"
         assert later_miss["score_locked"] is False
         assert not later_miss["improved"]
-        assert client.get(
-            f"/api/admin/students/{student_id}", headers=teacher_headers
-        ).json()["homeworks"][0]["tasks"][task]["score"] == "1"
+        assert (
+            client.get(f"/api/admin/students/{student_id}", headers=teacher_headers).json()[
+                "homeworks"
+            ][0]["tasks"][task]["score"]
+            == "1"
+        )
         corrected_filter = client.get(
             "/api/admin/students",
             headers=teacher_headers,
@@ -483,16 +526,16 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
         )
         assert b"HARD_LATE" in details.content
         assert b"MANUAL" in details.content
-        gradebook = client.get(
-            "/api/admin/course-export/gradebook.csv", headers=teacher_headers
-        )
+        gradebook = client.get("/api/admin/course-export/gradebook.csv", headers=teacher_headers)
         assert gradebook.status_code == 200
         assert b"total" in gradebook.content and b"student_26" in gradebook.content
         journal = client.get("/api/admin/course-export/journal.csv", headers=teacher_headers)
         assert journal.status_code == 200
         assert b"MANUAL" in journal.content
         assert (
-            client.get("/api/admin/course-export/milestones.csv", headers=teacher_headers).status_code
+            client.get(
+                "/api/admin/course-export/milestones.csv", headers=teacher_headers
+            ).status_code
             == 404
         )
         assert client.post("/api/admin/auth/logout", headers=teacher_headers).status_code == 200
@@ -509,17 +552,21 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
             f"/api/admin/students/{student_id}/reset-password", headers=assistant_headers
         )
         assert reset.status_code == 200
-        assert client.get(
-            "/api/me", headers={"Authorization": f"Bearer {active_session}"}
-        ).status_code == 401
+        assert (
+            client.get("/api/me", headers={"Authorization": f"Bearer {active_session}"}).status_code
+            == 401
+        )
         assert reset.json()["temporary_password"] not in json.dumps(
             client.get(f"/api/admin/students/{student_id}/history", headers=teacher_headers).json()
         )
         assert client.post("/api/admin/auth/logout", headers=assistant_headers).status_code == 200
-        assert client.post(
-            "/api/auth/login",
-            json={"username": "student_26", "password": reset.json()["temporary_password"]},
-        ).status_code == 200
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={"username": "student_26", "password": reset.json()["temporary_password"]},
+            ).status_code
+            == 200
+        )
         audit_rows = client.get("/api/admin/audit", headers=teacher_headers).json()
         audit_actions = {item["action"] for item in audit_rows}
         assert {
@@ -615,9 +662,12 @@ def test_course_manifest_allows_student_to_open_cabinet_before_teacher_publish(
         for task_id, sql in (("Q01", "SELECT 1"), ("Q02", "SELECT 2")):
             draft_url = f"/api/homeworks/hw1/tasks/{task_id}/draft"
             assert client.put(draft_url, headers=task_headers, json={"sql": sql}).status_code == 200
-            assert client.get(
-                f"/api/homeworks/hw1/tasks/{task_id}", headers=task_headers
-            ).json()["draft"] == sql
+            assert (
+                client.get(f"/api/homeworks/hw1/tasks/{task_id}", headers=task_headers).json()[
+                    "draft"
+                ]
+                == sql
+            )
 
 
 @pytest.mark.skipif(
@@ -693,10 +743,13 @@ def test_staff_doors_and_empty_course(tmp_path, monkeypatch):
         )
         assert denied.status_code == 403
         assert denied.json()["detail"] == "Эта учётная запись не ассистент. Вход закрыт."
-        assert client.post(
-            "/api/auth/assistant",
-            json={"username": "plain_student", "password": "wrong-password"},
-        ).status_code == 401
+        assert (
+            client.post(
+                "/api/auth/assistant",
+                json={"username": "plain_student", "password": "wrong-password"},
+            ).status_code
+            == 401
+        )
         wrong_key = client.post(
             "/api/auth/administrator",
             json={
@@ -739,11 +792,14 @@ def test_staff_doors_and_empty_course(tmp_path, monkeypatch):
         helper_id = client.get(
             "/api/me", headers={"Authorization": f"Bearer {helper.json()['token']}"}
         ).json()["id"]
-        assert client.patch(
-            f"/api/admin/students/{helper_id}/role",
-            headers=admin_headers,
-            json={"is_assistant": True},
-        ).status_code == 200
+        assert (
+            client.patch(
+                f"/api/admin/students/{helper_id}/role",
+                headers=admin_headers,
+                json={"is_assistant": True},
+            ).status_code
+            == 200
+        )
         assistant = client.post(
             "/api/auth/assistant",
             json={"username": "helper_door", "password": "long-example-password"},

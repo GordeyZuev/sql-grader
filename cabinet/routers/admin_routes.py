@@ -66,7 +66,10 @@ from cabinet.api import (
     STRUCTURE_PATTERNS,
     active_manifest,
     admin,
+    adjusted_from_marks,
+    highest_final_points,
     highest_raw_points,
+    public_points,
     score_from_records,
     public_task,
     record_audit,
@@ -75,6 +78,7 @@ from cabinet.api import (
     task_for,
 )
 from cabinet.routers.admin import router as admin_router
+
 
 @admin_router.post("/auth/login")
 def admin_login(data: AdminLoginInput, request: Request):
@@ -261,7 +265,12 @@ def publish(data: PublishInput, actor: str = Depends(super_admin)):
                 record_audit(
                     actor,
                     "manifest_publish_rejected",
-                    {"homework": hw.id, "task": task.id, "reason": "missing_required_constructs", "items": missing},
+                    {
+                        "homework": hw.id,
+                        "task": task.id,
+                        "reason": "missing_required_constructs",
+                        "items": missing,
+                    },
                 )
                 raise HTTPException(
                     422,
@@ -311,8 +320,11 @@ def admin_students(
     if sort not in {"name", "username", "score", "status"}:
         raise HTTPException(422, "Unsupported sort field")
     target_tasks = []
+    manifest = None
+    homework_soft = {}
     try:
         _, manifest, _ = active_manifest()
+        homework_soft = {hw.id: hw.soft_deadline for hw in manifest.homeworks}
         for hw in manifest.homeworks:
             if homework and hw.id != homework:
                 continue
@@ -350,15 +362,28 @@ def admin_students(
             scores[key] = score_from_records(
                 manual_by_task.get(key), achievements_by_task.get(key, [])
             )
+        finals: dict[tuple[int, str, str], Decimal] = {}
+        if manifest is not None:
+            for key, marks in achievements_by_task.items():
+                soft = homework_soft.get(key[1])
+                if soft is None:
+                    continue
+                finals[key] = adjusted_from_marks(marks, soft, manifest.policy, manifest.timezone)
         active = {(row[0], row[1], row[2]) for row in activity}
         for s in students:
-            if search and search.strip().casefold() not in f"{s['full_name']} {s['username']}".casefold():
+            if (
+                search
+                and search.strip().casefold() not in f"{s['full_name']} {s['username']}".casefold()
+            ):
                 continue
             assigned = target_tasks
             if not assigned and not homework and not task:
                 assigned = sorted({(h, t, Decimal(0)) for sid, h, t in scores if sid == s["id"]})
             score = sum(
                 (scores.get((s["id"], h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0)
+            )
+            adjusted = sum(
+                (finals.get((s["id"], h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0)
             )
             has_activity = any((s["id"], h, t) in active for h, t, _ in assigned)
             if not has_activity:
@@ -383,6 +408,7 @@ def admin_students(
                     "username": s["username"],
                     "full_name": s["full_name"],
                     "score": str(score),
+                    "final_score": public_points(adjusted),
                     "status": student_status,
                 }
             )
@@ -475,7 +501,14 @@ def admin_student_detail(student_id: int, _: str = Depends(admin)):
         )
         return homework["tasks"].setdefault(
             task_id,
-            {"id": task_id, "title": task_id, "max_points": None, "attempts": [], "runs": [], "manual_grades": []},
+            {
+                "id": task_id,
+                "title": task_id,
+                "max_points": None,
+                "attempts": [],
+                "runs": [],
+                "manual_grades": [],
+            },
         )
 
     for row in attempts:
@@ -511,6 +544,24 @@ def admin_student_detail(student_id: int, _: str = Depends(admin)):
                 [(Decimal(row["points"]), row["created_at"]) for row in milestones],
             )
             task["score"] = str(score)
+            hw_meta = None
+            if manifest:
+                hw_meta = next(
+                    (item for item in manifest.homeworks if item.id == homework_id),
+                    None,
+                )
+            task["final_score"] = (
+                public_points(
+                    adjusted_from_marks(
+                        [(Decimal(row["points"]), row["created_at"]) for row in milestones],
+                        hw_meta.soft_deadline,
+                        manifest.policy,
+                        manifest.timezone,
+                    )
+                )
+                if hw_meta
+                else "0"
+            )
     return {
         "student": dict(student_row),
         "homeworks": list(groups.values()),
@@ -525,9 +576,7 @@ def admin_student_detail(student_id: int, _: str = Depends(admin)):
 def reset_student_password(student_id: int, actor: str = Depends(admin)):
     password = secrets.token_urlsafe(12)
     with store.transaction() as db:
-        target = db.execute(
-            "SELECT username FROM students WHERE id=?", (student_id,)
-        ).fetchone()
+        target = db.execute("SELECT username FROM students WHERE id=?", (student_id,)).fetchone()
         if not target:
             raise HTTPException(404, "Студент не найден")
         db.execute(
@@ -623,7 +672,9 @@ def list_admin_accounts(_: str = Depends(super_admin)):
 def create_admin_account(data: AdminCreateInput, actor: str = Depends(super_admin)):
     username = data.username.strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]{4,32}", username):
-        raise HTTPException(422, "Логин: 4–32 латинских буквы, цифры, точка, дефис или подчёркивание")
+        raise HTTPException(
+            422, "Логин: 4–32 латинских буквы, цифры, точка, дефис или подчёркивание"
+        )
     password = secrets.token_urlsafe(12)
     try:
         with store.transaction() as db:
@@ -645,7 +696,9 @@ def create_admin_account(data: AdminCreateInput, actor: str = Depends(super_admi
 
 
 @admin_router.patch("/accounts/{account_id}")
-def update_admin_account(account_id: int, data: AdminActiveInput, actor: str = Depends(super_admin)):
+def update_admin_account(
+    account_id: int, data: AdminActiveInput, actor: str = Depends(super_admin)
+):
     with store.transaction() as db:
         account = db.execute(
             "SELECT username FROM admin_accounts WHERE id=?", (account_id,)
@@ -956,7 +1009,7 @@ def export_course_csv(kind: str, actor: str = Depends(admin)):
 
 @admin_router.get("/export/{hw_id}/{kind}.csv")
 def export_csv(hw_id: str, kind: str, actor: str = Depends(admin)):
-    if kind not in {"results", "results_milestones", "results_details"}:
+    if kind not in {"results", "results_final", "results_milestones", "results_details"}:
         raise HTTPException(404, "Неизвестная выгрузка")
     output = io.StringIO(newline="")
     writer = csv.writer(output, delimiter=";")
@@ -1036,7 +1089,21 @@ def export_csv(hw_id: str, kind: str, actor: str = Depends(admin)):
             for s in db.execute(
                 "SELECT id,COALESCE(username,email) AS username,full_name FROM students ORDER BY username"
             ):
-                vals = [highest_raw_points(db, s["id"], hw_id, t.id) for t in hw.tasks]
+                if kind == "results_final":
+                    vals = [
+                        highest_final_points(
+                            db,
+                            s["id"],
+                            hw_id,
+                            t.id,
+                            hw.soft_deadline,
+                            manifest.policy,
+                            manifest.timezone,
+                        )
+                        for t in hw.tasks
+                    ]
+                else:
+                    vals = [highest_raw_points(db, s["id"], hw_id, t.id) for t in hw.tasks]
                 total = sum(vals, Decimal(0))
                 writer.writerow(
                     [

@@ -1,7 +1,8 @@
 """Deterministic grading, deadline and milestone primitives.
 
-The cabinet stores raw achievements. Late penalties are calculated only for
-exports, so a later result cannot erase an earlier, more valuable achievement.
+The cabinet stores raw achievements. The live score is the current raw mark.
+The penalized score is the best result after the formula, so a later raw
+improvement cannot erase an earlier, more valuable achievement.
 """
 
 from __future__ import annotations
@@ -174,15 +175,34 @@ class Achievement:
         return final_score(self.points, self.achieved_at, self.soft_deadline, self.policy)
 
 
+def best_adjusted_points(
+    marks: Iterable[tuple[Decimal, datetime]],
+    soft_deadline: datetime,
+    policy: PenaltyPolicy | None = None,
+) -> Decimal:
+    """Choose the best penalized mark. An empty list is zero."""
+    policy = policy or PenaltyPolicy()
+    best = Decimal(0)
+    for points, achieved_at in marks:
+        best = max(best, final_score(points, achieved_at, soft_deadline, policy))
+    return best
+
+
 def best_adjusted_by_task(
     achievements: Iterable[Achievement],
 ) -> dict[tuple[str, str, str], Decimal]:
     """Choose the best penalized achievement per student/homework/task."""
-    best: dict[tuple[str, str, str], Decimal] = {}
+    grouped: dict[tuple[str, str, str], list[Achievement]] = {}
     for item in achievements:
-        key = (item.student_email, item.homework, item.task)
-        best[key] = max(best.get(key, Decimal(0)), item.adjusted_points)
-    return best
+        grouped.setdefault((item.student_email, item.homework, item.task), []).append(item)
+    return {
+        key: best_adjusted_points(
+            [(item.points, item.achieved_at) for item in items],
+            items[0].soft_deadline,
+            items[0].policy,
+        )
+        for key, items in grouped.items()
+    }
 
 
 def parse_deadline(value: str, timezone: str) -> datetime:

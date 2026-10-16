@@ -7,6 +7,7 @@ from cabinet.domains.scoring import (
     Achievement,
     PenaltyPolicy,
     best_adjusted_by_task,
+    best_adjusted_points,
     final_score,
     late_days,
 )
@@ -59,3 +60,20 @@ def test_best_adjusted_milestone_can_be_an_earlier_raw_result():
         ),
     ]
     assert best_adjusted_by_task(milestones)[("s@example.edu", "hw1", "Q01")] == Decimal("0.80")
+
+
+def test_best_adjusted_points_keeps_the_earlier_better_mark():
+    policy = PenaltyPolicy(
+        formula="score - late_days * 0.1",
+        max_penalty_fraction=Decimal("0.8"),
+        minimum_score_fraction=Decimal(0),
+    )
+    soft = dt("2026-01-01T00:00:00+03:00")
+    early = (Decimal("0.5"), soft + timedelta(days=1))
+    late = (Decimal(1), soft + timedelta(days=7))
+    assert final_score(*early, soft, policy) == Decimal("0.40")
+    assert final_score(*late, soft, policy) == Decimal("0.30")
+    assert best_adjusted_points([], soft, policy) == Decimal(0)
+    assert best_adjusted_points([early], soft, policy) == Decimal("0.40")
+    assert best_adjusted_points([early, late], soft, policy) == Decimal("0.40")
+    assert best_adjusted_points([(Decimal(1), soft)], soft, policy) == Decimal("1.00")

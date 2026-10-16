@@ -1,4 +1,5 @@
 """Shared API services and application assembly."""
+
 from __future__ import annotations
 
 import hashlib
@@ -34,6 +35,8 @@ from cabinet.domains.psql_commands import (
     relation_kinds,
 )
 from cabinet.domains.scoring import (
+    PenaltyPolicy,
+    best_adjusted_points,
     grading_open,
     parse_deadline,
 )
@@ -68,10 +71,13 @@ async def limit_request_body(request: Request, call_next):
     if content_length:
         try:
             if int(content_length) > MAX_REQUEST_BYTES:
-                return JSONResponse(status_code=413, content={"detail": "Запрос превышает лимит 25 МБ"})
+                return JSONResponse(
+                    status_code=413, content={"detail": "Запрос превышает лимит 25 МБ"}
+                )
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "Некорректный Content-Length"})
     return await call_next(request)
+
 
 # Route groups live in cabinet.routers; shared dependencies and domain services are
 # defined here so handlers use one consistent authentication and storage layer.
@@ -421,50 +427,57 @@ def highest_raw_points(db, student_id: int, homework_id: str, task_id: str) -> D
     )
 
 
+def _as_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def adjusted_from_marks(
+    marks: list[tuple[Decimal, datetime | str]],
+    soft_deadline: datetime | str,
+    policy: PenaltyPolicy,
+    timezone: str = "Europe/Moscow",
+) -> Decimal:
+    deadline = (
+        soft_deadline
+        if isinstance(soft_deadline, datetime)
+        else parse_deadline(str(soft_deadline), timezone)
+    )
+    return best_adjusted_points(
+        [(Decimal(points), _as_datetime(achieved_at)) for points, achieved_at in marks],
+        deadline,
+        policy,
+    )
 
 
+def highest_final_points(
+    db,
+    student_id: int,
+    homework_id: str,
+    task_id: str,
+    soft_deadline: datetime | str,
+    policy: PenaltyPolicy,
+    timezone: str = "Europe/Moscow",
+) -> Decimal:
+    achievements = db.execute(
+        "SELECT points, created_at FROM achievements WHERE student_id=? AND homework=? AND task=?",
+        (student_id, homework_id, task_id),
+    ).fetchall()
+    return adjusted_from_marks(
+        [(Decimal(row["points"]), row["created_at"]) for row in achievements],
+        soft_deadline,
+        policy,
+        timezone,
+    )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def public_points(value: Decimal) -> str:
+    """Serialize a mark the same way raw scores already stringify."""
+    text = format(Decimal(value), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def execute_readonly(sql: str, *, row_limit: int = 200, params=None):
@@ -513,7 +526,9 @@ def _execute_readonly(sql: str, *, row_limit: int = 200, params=None):
                     break
                 for row in batch:
                     values = [str(value) if value is not None else None for value in row]
-                    result_bytes += sum(len(value.encode("utf-8")) for value in values if value is not None)
+                    result_bytes += sum(
+                        len(value.encode("utf-8")) for value in values if value is not None
+                    )
                     if result_bytes > 20_000_000:
                         raise ValueError("Результат превышает лимит передачи данных 20 МБ")
                     rows.append(values)
@@ -561,7 +576,11 @@ def execute_psql_command(command: PsqlCommand):
     )
     records = [dict(zip(all_columns, row, strict=True)) for row in all_rows]
 
-    if command.name in {"dt", "dv", "dm", "di", "ds"} or not command.pattern or "*" in command.pattern:
+    if (
+        command.name in {"dt", "dv", "dm", "di", "ds"}
+        or not command.pattern
+        or "*" in command.pattern
+    ):
         filtered = [
             row
             for row in records
@@ -571,9 +590,23 @@ def execute_psql_command(command: PsqlCommand):
         columns = ["schema", "name", "type", "owner"]
         if command.detailed:
             columns.extend(["size", "description"])
-        type_names = {"r": "table", "p": "partitioned table", "f": "foreign table", "v": "view", "m": "materialized view", "S": "sequence", "i": "index", "I": "partitioned index"}
+        type_names = {
+            "r": "table",
+            "p": "partitioned table",
+            "f": "foreign table",
+            "v": "view",
+            "m": "materialized view",
+            "S": "sequence",
+            "i": "index",
+            "I": "partitioned index",
+        }
         rows = [
-            [row.get(column) if column not in {"type"} else type_names.get(row["kind"], row["kind"]) for column in columns]
+            [
+                row.get(column)
+                if column not in {"type"}
+                else type_names.get(row["kind"], row["kind"])
+                for column in columns
+            ]
             for row in filtered
         ]
         return columns, rows, elapsed, len(rows)
@@ -585,7 +618,9 @@ def execute_psql_command(command: PsqlCommand):
     else:
         matches = [row for row in records if row["name"] == pattern]
     if not matches:
-        raise PsqlCommandError(f"Таблица или представление «{pattern}» не найдены в доступных схемах")
+        raise PsqlCommandError(
+            f"Таблица или представление «{pattern}» не найдены в доступных схемах"
+        )
     relation = matches[0]
     columns_sql = (
         "SELECT a.attnum AS position, a.attname AS column, "
@@ -606,7 +641,12 @@ def execute_psql_command(command: PsqlCommand):
         return column_names, rows, elapsed + column_elapsed, count
     simple_columns = ["column", "type", "nullable", "default"]
     indices = [column_names.index(name) for name in simple_columns]
-    return simple_columns, [[row[index] for index in indices] for row in rows], elapsed + column_elapsed, count
+    return (
+        simple_columns,
+        [[row[index] for index in indices] for row in rows],
+        elapsed + column_elapsed,
+        count,
+    )
 
 
 def run_query(sql: str, user, kind: str, homework=None, task=None):
@@ -637,7 +677,18 @@ def run_query(sql: str, user, kind: str, homework=None, task=None):
                 elapsed,
                 count,
                 message,
-                json.dumps({"columns": columns, "rows": rows, "row_count": count, "elapsed_ms": elapsed, "truncated": truncated} if status == "ok" else {"error": message}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "columns": columns,
+                        "rows": rows,
+                        "row_count": count,
+                        "elapsed_ms": elapsed,
+                        "truncated": truncated,
+                    }
+                    if status == "ok"
+                    else {"error": message},
+                    ensure_ascii=False,
+                ),
                 store.now_iso(),
             ),
         )
@@ -670,10 +721,6 @@ def run_query(sql: str, user, kind: str, homework=None, task=None):
     }
 
 
-
-
-
-
 def clean_sql(sql: str) -> str:
     return inspect_sql(sql)[0]
 
@@ -696,7 +743,15 @@ def evaluate_task(hw_id: str, task, version: int | None, sql: str):
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         detail = execution_error_message(exc)
-        return "ERROR", Decimal(0), "Проверка временно недоступна", elapsed, 0, "error", {"error": detail}
+        return (
+            "ERROR",
+            Decimal(0),
+            "Проверка временно недоступна",
+            elapsed,
+            0,
+            "error",
+            {"error": detail},
+        )
     try:
         columns, rows, _, row_count = execute_readonly(sql, row_limit=100_000)
     except Exception as exc:
@@ -707,9 +762,23 @@ def evaluate_task(hw_id: str, task, version: int | None, sql: str):
             if getattr(exc, "sqlstate", None) == "42601" or "syntax error" in detail.lower()
             else "ERROR"
         )
-        return status, Decimal(0), detail, elapsed, 0, "error", {"error": detail, "columns": [], "rows": [], "row_count": 0, "elapsed_ms": elapsed}
+        return (
+            status,
+            Decimal(0),
+            detail,
+            elapsed,
+            0,
+            "error",
+            {"error": detail, "columns": [], "rows": [], "row_count": 0, "elapsed_ms": elapsed},
+        )
     elapsed = int((time.monotonic() - started) * 1000)
-    output = {"columns": columns, "rows": rows[:200], "row_count": row_count, "elapsed_ms": elapsed, "truncated": len(rows) > 200}
+    output = {
+        "columns": columns,
+        "rows": rows[:200],
+        "row_count": row_count,
+        "elapsed_ms": elapsed,
+        "truncated": len(rows) > 200,
+    }
     if not columns:
         return "ERROR", Decimal(0), "Запрос не вернул таблицу", elapsed, row_count, "error", output
     available = list(range(len(columns)))
@@ -766,26 +835,6 @@ def evaluate_task(hw_id: str, task, version: int | None, sql: str):
             output,
         )
     return "OK", task.points, "Верно", elapsed, row_count, "ok", output
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def run_recheck_job(job_id: int, actor: str, manifest, version: int, candidates: list[dict]):
@@ -929,18 +978,6 @@ def run_recheck_job(job_id: int, actor: str, manifest, version: int, candidates:
         _RECHECK_LOCK.release()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # Import endpoint modules only after shared dependencies and services above are defined.
 from cabinet.routers import (  # noqa: E402,F401
     admin_routes,
@@ -951,5 +988,12 @@ from cabinet.routers import (  # noqa: E402,F401
     system_routes,
 )
 
-for _router in (system_router, auth_router, coursework_router, query_router, admin_router, score_router):
+for _router in (
+    system_router,
+    auth_router,
+    coursework_router,
+    query_router,
+    admin_router,
+    score_router,
+):
     app.include_router(_router)

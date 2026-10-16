@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,7 @@ def test_psql_command_parser_allows_only_one_read_only_command():
 
 def test_psql_commands_run_read_only_and_are_saved_in_history(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "cabinet.sqlite3")
+    monkeypatch.setattr(api, "MANIFEST_FILE", Path(__file__).parents[1] / "manifest.example.json")
     calls = []
 
     def fake_execute(sql, *, row_limit=200, params=None):

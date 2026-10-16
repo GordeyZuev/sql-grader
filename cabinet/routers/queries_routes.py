@@ -30,13 +30,16 @@ from cabinet.api import (
     SqlInput,
     active_manifest,
     evaluate_task,
+    highest_final_points,
     highest_raw_points,
+    public_points,
     record_audit,
     run_query,
     student,
     task_for,
 )
 from cabinet.routers.queries import router as query_router
+
 
 @query_router.post("/format")
 def format_sql(data: SqlInput, user=Depends(student)):
@@ -88,7 +91,9 @@ def check_task(hw_id: str, task_id: str, data: SqlInput, user=Depends(student)):
         raise HTTPException(422, "Команды psql запускаются отдельно и не создают попытку проверки.")
     _, _, manifest_version = active_manifest()
     now = datetime.now().astimezone()
-    past_hard_deadline = not core.grading_open(now, parse_deadline(hw.hard_deadline, manifest.timezone))
+    past_hard_deadline = not core.grading_open(
+        now, parse_deadline(hw.hard_deadline, manifest.timezone)
+    )
     with store.closing(store.connect()) as db:
         override = db.execute(
             "SELECT 1 FROM deadline_overrides WHERE student_id=? AND homework=?",
@@ -145,9 +150,7 @@ def check_task(hw_id: str, task_id: str, data: SqlInput, user=Depends(student)):
         ).fetchone()
         previous = highest_raw_points(db, user["id"], hw_id, task_id)
         improved = points > previous
-        score_locked = (
-            manual is not None and previous == Decimal(manual["points"]) and not improved
-        )
+        score_locked = manual is not None and previous == Decimal(manual["points"]) and not improved
         if improved:
             db.execute(
                 "INSERT INTO achievements(student_id,homework,task,points,attempt_id,manual_grade_id,created_at) VALUES(?,?,?,?,?,NULL,?)",
@@ -192,6 +195,10 @@ def check_task(hw_id: str, task_id: str, data: SqlInput, user=Depends(student)):
             ),
             user["id"],
         )
+        standing = points if improved else previous
+        adjusted = highest_final_points(
+            db, user["id"], hw_id, task_id, hw.soft_deadline, manifest.policy, manifest.timezone
+        )
     return {
         "attempt_id": attempt_id,
         "verdict": verdict,
@@ -204,7 +211,8 @@ def check_task(hw_id: str, task_id: str, data: SqlInput, user=Depends(student)):
         "result": output,
         "created_at": timestamp,
         "improved": improved,
-        "score": str(points if improved else previous),
+        "score": str(standing),
+        "final_score": public_points(adjusted),
         "score_locked": score_locked,
     }
 

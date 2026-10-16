@@ -19,12 +19,15 @@ import json
 from cabinet.api import (
     SqlInput,
     active_manifest,
+    highest_final_points,
     highest_raw_points,
+    public_points,
     public_task,
     student,
     task_for,
 )
 from cabinet.routers.coursework import router as coursework_router
+
 
 @coursework_router.get("/homeworks")
 def homeworks(user=Depends(student)):
@@ -45,6 +48,15 @@ def homeworks(user=Depends(student)):
             tasks = []
             for task in hw.tasks:
                 best = highest_raw_points(db, user["id"], hw.id, task.id)
+                adjusted = highest_final_points(
+                    db,
+                    user["id"],
+                    hw.id,
+                    task.id,
+                    hw.soft_deadline,
+                    manifest.policy,
+                    manifest.timezone,
+                )
                 count = db.execute(
                     "SELECT COUNT(*) FROM attempts WHERE student_id=? AND homework=? AND task=?",
                     (user["id"], hw.id, task.id),
@@ -59,6 +71,7 @@ def homeworks(user=Depends(student)):
                         "title": task.title,
                         "max_points": str(task.points),
                         "score": str(best),
+                        "final_score": public_points(adjusted),
                         "checks": count,
                         "last_improvement": latest[0] if latest else None,
                     }
@@ -72,6 +85,9 @@ def homeworks(user=Depends(student)):
                     "grading_open": grading_is_open or hw.id in overrides,
                     "tasks": tasks,
                     "score": str(sum((Decimal(str(t["score"])) for t in tasks), Decimal(0))),
+                    "final_score": public_points(
+                        sum((Decimal(str(t["final_score"])) for t in tasks), Decimal(0))
+                    ),
                     "max_points": str(sum((t.points for t in hw.tasks), Decimal(0))),
                 }
             )
@@ -97,6 +113,9 @@ def get_task(hw_id: str, task_id: str, user=Depends(student)):
             (user["id"], hw_id, task_id),
         ).fetchall()
         best = highest_raw_points(db, user["id"], hw_id, task_id)
+        adjusted = highest_final_points(
+            db, user["id"], hw_id, task_id, hw.soft_deadline, manifest.policy, manifest.timezone
+        )
         override = db.execute(
             "SELECT 1 FROM deadline_overrides WHERE student_id=? AND homework=?",
             (user["id"], hw_id),
@@ -111,12 +130,14 @@ def get_task(hw_id: str, task_id: str, user=Depends(student)):
             "title": hw.title,
             "soft_deadline": hw.soft_deadline,
             "hard_deadline": hard_deadline,
-            "grading_open": core.grading_open(datetime.now().astimezone(), hard_at) or bool(override),
+            "grading_open": core.grading_open(datetime.now().astimezone(), hard_at)
+            or bool(override),
         },
         "task": public_task(task),
         "draft": draft["sql"] if draft else "",
         "draft_saved_at": draft["updated_at"] if draft else None,
         "score": str(best),
+        "final_score": public_points(adjusted),
         "manual_grade": dict(manual_grade) if manual_grade else None,
         "attempts": [
             {**dict(a), "result": json.loads(a["result_json"]) if a["result_json"] else None}

@@ -271,7 +271,7 @@ async function authSubmit(event) {
     localStorage.setItem('cabinet_token', token);
     if (staff) {
       authMode = 'login';
-      if (location.hash === '#admin') await route();
+      if (isAdminHash()) await route();
       else location.hash = '#admin';
       return;
     }
@@ -294,7 +294,7 @@ function formatDate(value) {
 async function renderUserbar(student = null) {
   if (!student) student = await api('/api/me');
   currentUser = student;
-  const onPanel = location.hash === '#admin' || location.hash.startsWith('#admin/');
+  const onPanel = isAdminHash();
   const onProfile = location.hash === '#profile';
   const onStudy = !onPanel && !onProfile;
   const switcher = student.is_assistant || student.is_superadmin
@@ -321,11 +321,105 @@ function formatPoints(value) {
   return Number(value).toFixed(2);
 }
 
+function adminLocation() {
+  const raw = location.hash.replace(/^#/, '');
+  const queryIndex = raw.indexOf('?');
+  const path = queryIndex === -1 ? raw : raw.slice(0, queryIndex);
+  const query = new URLSearchParams(queryIndex === -1 ? '' : raw.slice(queryIndex + 1));
+  const parts = path.replace(/^admin\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  return { path, parts, query, filterHomework: query.get('homework') || '' };
+}
+
+function isAdminHash() {
+  const { path } = adminLocation();
+  return path === 'admin' || path.startsWith('admin/');
+}
+
+function queueHref(homework) {
+  return homework ? `#admin?homework=${encodeURIComponent(homework)}` : '#admin';
+}
+
+function scorePairLabel(rawValue, finalValue, maxValue, penalized) {
+  if (maxValue && penalized) return `со штрафом ${finalValue} из ${maxValue}, балл ${rawValue}`;
+  if (maxValue) return `балл ${rawValue} из ${maxValue}`;
+  if (penalized) return `со штрафом ${finalValue}, балл ${rawValue}`;
+  return `балл ${rawValue}`;
+}
+
+function scorePairMarkup({ raw, final, max, size = 'compact' }) {
+  const rawValue = formatPoints(raw);
+  const finalValue = formatPoints(final);
+  const hasMax = max != null && max !== '';
+  const maxValue = hasMax ? formatPoints(max) : '';
+  const penalized = rawValue !== finalValue;
+  const shown = penalized ? finalValue : rawValue;
+  const mainTone = scoreTone(penalized ? final : raw, hasMax ? max : -1);
+  const rawTone = scoreTone(raw, hasMax ? max : -1);
+  const caption = size === 'plain'
+    ? ''
+    : `<small class="score-pair-caption">${penalized ? 'Балл со штрафом' : 'Балл'}</small>`;
+  const maxMarkup = hasMax ? `<span class="score-pair-max"> / ${maxValue}</span>` : '';
+  return `<div class="score-pair score-pair-${size}" data-score-pair data-raw-value="${rawValue}" data-final-value="${finalValue}" data-max-value="${maxValue}" aria-label="${scorePairLabel(rawValue, finalValue, maxValue, penalized)}">${caption}<span class="score-pair-values"><strong class="score-pair-main ${mainTone}" data-score-final>${shown}</strong><span class="score-pair-extra"${penalized ? '' : ' hidden'}>(<strong class="score-pair-raw ${rawTone}" data-score-raw>${rawValue}</strong>)</span>${maxMarkup}</span></div>`;
+}
+
+function paintScorePair(root, raw, final, max, animateFrom) {
+  if (!root) return;
+  const rawValue = formatPoints(raw);
+  const finalValue = formatPoints(final);
+  const hasMax = max != null && max !== '';
+  const maxValue = hasMax ? formatPoints(max) : '';
+  const penalized = rawValue !== finalValue;
+  const shown = penalized ? finalValue : rawValue;
+  const previousShown = root.dataset.finalValue === root.dataset.rawValue
+    ? root.dataset.rawValue
+    : root.dataset.finalValue;
+  root.dataset.rawValue = rawValue;
+  root.dataset.finalValue = finalValue;
+  root.dataset.maxValue = maxValue;
+  root.setAttribute('aria-label', scorePairLabel(rawValue, finalValue, maxValue, penalized));
+  const mainEl = root.querySelector('[data-score-final]');
+  const rawEl = root.querySelector('[data-score-raw]');
+  const maxEl = root.querySelector('.score-pair-max');
+  const extraEl = root.querySelector('.score-pair-extra');
+  const caption = root.querySelector('.score-pair-caption');
+  if (mainEl) {
+    mainEl.classList.remove('is-complete', 'is-partial', 'is-zero');
+    mainEl.classList.add(scoreTone(penalized ? final : raw, hasMax ? max : -1));
+  }
+  if (rawEl) {
+    rawEl.classList.remove('is-complete', 'is-partial', 'is-zero');
+    rawEl.classList.add(scoreTone(raw, hasMax ? max : -1));
+    rawEl.textContent = rawValue;
+  }
+  extraEl?.toggleAttribute('hidden', !penalized);
+  if (caption) caption.textContent = penalized ? 'Балл со штрафом' : 'Балл';
+  if (maxEl) maxEl.textContent = hasMax ? ` / ${maxValue}` : '';
+  if (!mainEl) return;
+  if (animateFrom != null && Number(previousShown) !== Number(shown) && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    animatePairRaw(mainEl, Number(previousShown), Number(shown));
+    return;
+  }
+  mainEl.textContent = shown;
+}
+
+function animatePairRaw(element, from, to) {
+  const startedAt = performance.now();
+  const duration = 720;
+  function frame(now) {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = 1 - (1 - progress) ** 3;
+    element.textContent = formatPoints(from + (to - from) * eased);
+    if (progress < 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
 function scoreTone(score, maximum) {
   const value = Number(score);
   const total = Number(maximum);
   if (total > 0 && value >= total) return 'is-complete';
   if (value > 0) return 'is-partial';
+  if (total < 0 && value > 0) return 'is-partial';
   return 'is-zero';
 }
 
@@ -362,21 +456,6 @@ function paintScoreState(row, card, score, maximum) {
   state.replaceChildren();
 }
 
-function animatePoints(element, from, to, maximum) {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    element.textContent = `${formatPoints(to)} / ${formatPoints(maximum)}`;
-    return;
-  }
-  const startedAt = performance.now();
-  const duration = 720;
-  function frame(now) {
-    const progress = Math.min(1, (now - startedAt) / duration);
-    const eased = 1 - (1 - progress) ** 3;
-    element.textContent = `${formatPoints(from + (to - from) * eased)} / ${formatPoints(maximum)}`;
-    if (progress < 1) requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-}
 
 function celebrateCompletion(card) {
   if (!card || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -504,7 +583,7 @@ function renderHomework(homework) {
   const toneClass = { complete: 'is-complete', partial: 'is-partial' }[homeworkTone(homework)] || '';
   app.innerHTML = `<div class="page-shell homework-page">
     ${breadcrumbMarkup([{ label: 'Главная', href: '#home' }, { label: `${homework.id.toUpperCase()} · ${homework.title}` }])}
-    <div class="homework-layout">${taskRailMarkup(homework.id, homework.title, homework.tasks)}<section class="homework-overview"><div><p class="eyebrow">${escapeHtml(homework.id.toUpperCase())}</p><h1>${escapeHtml(homework.title)}</h1><div class="homework-progress"><div><span>${status.complete} из ${homework.tasks.length} задач решено</span><span>${percent}%</span></div><div class="progress-track ${toneClass}"><span style="width:${percent}%"></span></div></div><div class="homework-overview-deadlines"><span>Мягкий срок <strong>${formatDate(homework.soft_deadline)}</strong></span><span>Жёсткий срок <strong>${formatDate(homework.hard_deadline)}</strong></span></div></div><div class="homework-score ${toneClass} ${Number(homework.score) === 0 ? 'is-zero' : ''}"><strong>${formatPoints(homework.score)}</strong><span>из ${formatPoints(homework.max_points)} баллов</span></div></section></div>
+    <div class="homework-layout">${taskRailMarkup(homework.id, homework.title, homework.tasks)}<section class="homework-overview"><div><p class="eyebrow">${escapeHtml(homework.id.toUpperCase())}</p><h1>${escapeHtml(homework.title)}</h1><div class="homework-progress"><div><span>${status.complete} из ${homework.tasks.length} задач решено</span><span>${percent}%</span></div><div class="progress-track ${toneClass}"><span style="width:${percent}%"></span></div></div><div class="homework-overview-deadlines"><span>Мягкий срок <strong>${formatDate(homework.soft_deadline)}</strong></span><span>Жёсткий срок <strong>${formatDate(homework.hard_deadline)}</strong></span></div></div><div class="homework-score">${scorePairMarkup({ raw: homework.score, final: homework.final_score ?? 0, max: homework.max_points, size: 'featured' })}</div></section></div>
   </div>`;
 }
 
@@ -512,20 +591,20 @@ async function renderHome() {
   try {
     const homeworks = await api('/api/homeworks');
     const totalScore = homeworks.reduce((sum, homework) => sum + Number(homework.score), 0);
+    const totalFinal = homeworks.reduce((sum, homework) => sum + Number(homework.final_score ?? 0), 0);
     const maxScore = homeworks.reduce((sum, homework) => sum + Number(homework.max_points), 0);
 
     app.innerHTML = `
       <div class="page-shell home-page">
         <section class="home-hero"><h1>Мои задания</h1><a class="secondary" href="#sandbox">Открыть песочницу</a></section>
-        <div class="section-heading homework-list-heading"><h2>Домашние задания</h2><span class="home-total-score">Баллы за курс <strong class="${scoreTone(totalScore, maxScore)}">${formatPoints(totalScore)} / ${formatPoints(maxScore)}</strong></span></div>
+        <div class="section-heading homework-list-heading"><h2>Домашние задания</h2><span class="home-total-score">${scorePairMarkup({ raw: totalScore, final: totalFinal, max: maxScore })}</span></div>
         <section class="homework-grid">${homeworks.map((homework) => {
           const status = homeworkStatus(homework);
           const percent = homework.tasks.length ? Math.round(status.complete / homework.tasks.length * 100) : 0;
           const tone = homeworkTone(homework);
           const tileClass = tone === 'complete' ? 'homework-complete' : tone === 'partial' ? 'is-partial' : '';
           const toneClass = tone ? `is-${tone}` : '';
-          const scoreClass = Number(homework.score) === 0 ? 'is-zero' : '';
-          return `<a class="homework-tile ${tileClass}" href="#homework/${encodeURIComponent(homework.id)}"><div class="homework-tile-heading"><span class="eyebrow">${escapeHtml(homework.id.toUpperCase())}</span><h3>${escapeHtml(homework.title)}</h3><span class="homework-tile-score">Баллы <strong class="${scoreClass}">${formatPoints(homework.score)} / ${formatPoints(homework.max_points)}</strong></span></div><div class="homework-tile-deadlines"><span>Мягкий срок <strong>${formatDate(homework.soft_deadline)}</strong></span><span>Жёсткий срок <strong>${formatDate(homework.hard_deadline)}</strong></span></div><div class="homework-tile-progress"><div class="progress-track ${toneClass}"><span style="width:${percent}%"></span></div><span>${status.complete} из ${homework.tasks.length} задач</span></div></a>`;
+          return `<a class="homework-tile ${tileClass}" href="#homework/${encodeURIComponent(homework.id)}"><div class="homework-tile-heading"><span class="eyebrow">${escapeHtml(homework.id.toUpperCase())}</span><h3>${escapeHtml(homework.title)}</h3><span class="homework-tile-score">${scorePairMarkup({ raw: homework.score, final: homework.final_score ?? 0, max: homework.max_points })}</span></div><div class="homework-tile-deadlines"><span>Мягкий срок <strong>${formatDate(homework.soft_deadline)}</strong></span><span>Жёсткий срок <strong>${formatDate(homework.hard_deadline)}</strong></span></div><div class="homework-tile-progress"><div class="progress-track ${toneClass}"><span style="width:${percent}%"></span></div><span>${status.complete} из ${homework.tasks.length} задач</span></div></a>`;
         }).join('')}</section>
       </div>`;
   } catch (error) {
@@ -676,7 +755,7 @@ async function renderTask(homeworkId, taskId) {
           <aside class="task-context">
             <section class="context-card problem-card"><div class="context-title"><h2>${escapeHtml(taskDisplayTitle(task))}</h2></div><article class="markdown-body">${window.CabinetMarkdown.render(task.statement)}</article>${required.length ? `<div class="task-requirements"><span class="eyebrow">ОБЯЗАТЕЛЬНО ДЛЯ ПРОВЕРКИ</span><div class="requirement-chips">${required.map((name) => `<span class="requirement-chip">${escapeHtml(name)}</span>`).join('')}</div><p class="requirement-note">За отсутствующие конструкции начисляется частичный балл.</p></div>` : ''}</section>
             <section class="context-card deadline-summary"><p class="eyebrow">СРОКИ · ${escapeHtml(homework.id.toUpperCase())}</p><div class="deadline-values"><div><span>Мягкий срок</span><strong>${formatDate(homework.soft_deadline)}</strong></div><div><span>Жёсткий срок</span><strong>${formatDate(homework.hard_deadline)}</strong></div></div>${homework.grading_open ? '' : '<p class="deadline-status closed">Срок истёк. Чтобы открыть проверку, обратитесь к преподавателю.</p>'}</section>
-            <section class="context-card task-result-card ${scoreTone(data.score, task.points)}"><span>Результат</span><strong id="best-score">${formatPoints(data.score)} / ${formatPoints(task.points)}</strong>${data.manual_grade ? `<div class="student-manual-grade"><strong>Оценка преподавателя · ${formatPoints(data.manual_grade.points)} балла</strong><span>${escapeHtml(data.manual_grade.comment)}</span><small>${escapeHtml(data.manual_grade.actor)} · ${formatDate(data.manual_grade.created_at)}</small></div>` : ''}</section>
+            <section class="context-card task-result-card ${scoreTone(data.score, task.points)}">${scorePairMarkup({ raw: data.score, final: data.final_score ?? 0, max: task.points, size: 'featured' })}${data.manual_grade ? `<div class="student-manual-grade"><strong>Оценка преподавателя · ${formatPoints(data.manual_grade.points)} балла</strong><span>${escapeHtml(data.manual_grade.comment)}</span><small>${escapeHtml(data.manual_grade.actor)} · ${formatDate(data.manual_grade.created_at)}</small></div>` : ''}</section>
           </aside>
           <section class="workbench-column"><div id="task-editor"></div></section>
           </div>
@@ -830,14 +909,12 @@ async function checkTaskQuery(homeworkId, taskId, sql) {
     method: 'POST', body: JSON.stringify({ sql }),
   });
   if (location.hash === `#task/${homeworkId}/${taskId}`) {
-    const score = document.querySelector('#best-score');
-    const previousPoints = score ? Number(score.textContent.split('/')[0].trim()) : 0;
+    const pair = document.querySelector('.task-result-card [data-score-pair]');
+    const previousPoints = pair ? Number(pair.dataset.rawValue) : 0;
     const standing = Number(result.score ?? result.points);
+    const adjusted = Number(result.final_score ?? standing);
     const maximum = Number(result.max_points);
-    if (score) {
-      if (result.improved) animatePoints(score, previousPoints, standing, maximum);
-      else score.textContent = `${formatPoints(standing)} / ${formatPoints(maximum)}`;
-    }
+    paintScorePair(pair, standing, adjusted, maximum, result.improved ? previousPoints : undefined);
     const currentTask = document.querySelector('.task-nav-row[aria-current="page"]');
     const resultCard = document.querySelector('.task-result-card');
     const newlyCompleted = currentTask && !currentTask.classList.contains('done') && standing >= maximum;
@@ -859,7 +936,7 @@ async function checkTaskQuery(homeworkId, taskId, sql) {
 async function route() {
   const match = location.hash.match(/^#task\/([^/]+)\/([^/]+)$/);
   const homeworkMatch = location.hash.match(/^#homework\/([^/]+)$/);
-  const adminRoute = location.hash === '#admin' || location.hash.startsWith('#admin/');
+  const adminRoute = isAdminHash();
   const authenticatedRoute = Boolean(token) && !adminRoute;
   let student = null;
   if (authenticatedRoute) {
@@ -995,11 +1072,18 @@ function adminIsSuper() {
 }
 
 function parseAdminRoute() {
-  const parts = location.hash.replace(/^#admin\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
-  if (parts[0] === 'student' && parts.length >= 4) return { screen: 'task', studentId: parts[1], homework: parts[2], task: parts[3] };
-  if (parts[0] === 'student' && parts[1]) return { screen: 'student', studentId: parts[1] };
-  if (['export', 'course', 'audit', 'accounts'].includes(parts[0])) return { screen: parts[0] };
-  return { screen: 'queue' };
+  const { parts, filterHomework } = adminLocation();
+  if (parts[0] === 'student' && parts.length >= 4) {
+    return { screen: 'task', studentId: parts[1], homework: parts[2], task: parts[3], filterHomework };
+  }
+  if (parts[0] === 'student' && parts[1]) return { screen: 'student', studentId: parts[1], filterHomework };
+  if (['export', 'course', 'audit', 'accounts'].includes(parts[0])) return { screen: parts[0], filterHomework };
+  return { screen: 'queue', filterHomework };
+}
+
+function studentHref(studentId, extra = '', filterHomework = adminLocation().filterHomework) {
+  const path = extra ? `#admin/student/${studentId}/${extra}` : `#admin/student/${studentId}`;
+  return filterHomework ? `${path}?homework=${encodeURIComponent(filterHomework)}` : path;
 }
 
 function adminNav(active) {
@@ -1027,7 +1111,7 @@ async function renderAdminApp() {
   if (screen === 'queue') await renderAdminQueue(target);
   else if (screen === 'student') await renderAdminStudent(target, routeInfo.studentId);
   else if (screen === 'task') await renderAdminTask(target, routeInfo);
-  else if (screen === 'export') renderAdminExport(target);
+  else if (screen === 'export') await renderAdminExport(target);
   else if (screen === 'course') await renderAdminCourse(target);
   else if (screen === 'audit') renderAdminAudit(target);
   else if (screen === 'accounts') {
@@ -1036,10 +1120,21 @@ async function renderAdminApp() {
 }
 
 async function renderAdminQueue(target) {
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Очередь</h2><span class="section-count" id="queue-count">…</span></div><p class="muted">Студенты, у которых уже есть проверка, а балл ещё не полный. Поиск находит любого студента, в том числе без попыток.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="queue-search" placeholder="Например, ivan_26"></label></div><div id="queue-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></div></section>`;
+  const filterHomework = adminLocation().filterHomework;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Очередь</h2><span class="section-count" id="queue-count">…</span></div><p class="muted">Студенты, у которых уже есть проверка, а балл ещё не полный. Поиск находит любого студента, в том числе без попыток.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="queue-search" placeholder="Например, ivan_26"></label><label class="field">Домашнее задание<span id="queue-hw-slot"></span></label></div><div id="queue-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></div></section>`;
   document.querySelector('#queue-search').addEventListener('input', paintQueue);
   try {
-    queueStudents = await adminApi('/api/admin/students?sort=name');
+    const [homeworks, students] = await Promise.all([
+      api('/api/homeworks'),
+      adminApi(`/api/admin/students?sort=name${filterHomework ? `&homework=${encodeURIComponent(filterHomework)}` : ''}`),
+    ]);
+    document.querySelector('#queue-hw-slot').innerHTML = homeworkSelectMarkup(homeworks, 'queue-hw', true);
+    const select = document.querySelector('#queue-hw');
+    if (select) {
+      select.value = filterHomework;
+      select.addEventListener('change', () => { location.hash = queueHref(select.value); });
+    }
+    queueStudents = students;
     paintQueue();
   } catch (error) {
     document.querySelector('#queue-list').textContent = error.message;
@@ -1048,6 +1143,7 @@ async function renderAdminQueue(target) {
 
 function paintQueue() {
   const query = document.querySelector('#queue-search')?.value.trim().toLowerCase() || '';
+  const filterHomework = adminLocation().filterHomework;
   const labels = { not_started: 'Нет попыток', complete: 'Полный балл', partial: 'Частично', zero: '0 баллов' };
   const rows = queueStudents.filter((student) => {
     const inQueue = student.status === 'partial' || student.status === 'zero';
@@ -1060,7 +1156,7 @@ function paintQueue() {
   if (!list) return;
   list.innerHTML = rows.length ? `<div class="queue-list">${rows.map((student) => {
     const tone = student.status === 'complete' ? 'is-complete' : student.status === 'partial' ? 'is-partial' : 'is-zero';
-    return `<a class="queue-row" href="#admin/student/${student.id}"><span class="queue-person"><strong>${escapeHtml(student.full_name)}</strong><small>${escapeHtml(student.username)}</small></span><span class="score-figure ${tone}">${formatPoints(student.score)}</span><span class="status-pill ${tone}">${labels[student.status] || escapeHtml(student.status)}</span></a>`;
+    return `<a class="queue-row" href="${studentHref(student.id, '', filterHomework)}"><span class="queue-person"><strong>${escapeHtml(student.full_name)}</strong><small>${escapeHtml(student.username)}</small></span>${scorePairMarkup({ raw: student.score, final: student.final_score ?? 0, size: 'plain' })}<span class="status-pill ${tone}">${labels[student.status] || escapeHtml(student.status)}</span></a>`;
   }).join('')}</div>` : `<p class="muted">${query ? 'Такого студента нет.' : 'Очередь пуста: у всех с попытками уже полный балл.'}</p>`;
 }
 
@@ -1069,10 +1165,14 @@ async function renderAdminStudent(target, studentId) {
   try {
     const detail = await adminApi(`/api/admin/students/${studentId}`);
     const student = detail.student;
-    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="#admin">Очередь</a></p><div class="student-detail-heading"><div><h2>${escapeHtml(student.full_name)}</h2><span>${escapeHtml(student.username)} · аккаунт с ${formatDate(student.created_at)}</span></div><button class="secondary" id="reset-student-password" type="button">Сбросить пароль</button></div><div class="temporary-password" id="temporary-password"></div></section>${detail.homeworks.map((homework) => `<section class="admin-section card-surface"><h3>${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</h3><div class="student-task-list">${Object.values(homework.tasks).map((task) => {
-      const tone = scoreTone(task.score, task.max_points);
-      return `<a class="student-task-row" href="#admin/student/${studentId}/${encodeURIComponent(homework.id)}/${encodeURIComponent(task.id)}"><span class="task-nav-index">${escapeHtml(task.id)}</span><span>${escapeHtml(task.title || task.id)}</span><strong class="${tone}">${formatPoints(task.score || 0)} / ${formatPoints(task.max_points || 0)}</strong></a>`;
-    }).join('')}</div><form class="deadline-form"><input type="hidden" name="student_id" value="${escapeHtml(studentId)}"><input type="hidden" name="homework" value="${escapeHtml(homework.id)}"><label class="field">Открыть проверку после жёсткого срока<input name="comment" required minlength="3" maxlength="2000" placeholder="Основание"></label><button class="secondary" type="submit">Открыть проверку</button><p class="notice" data-override-result></p></form></section>`).join('')}<section class="admin-section card-surface"><h3>Песочница</h3><div class="attempt-list">${detail.sandbox_runs.length ? detail.sandbox_runs.map((run, index) => runMarkup(run, detail.sandbox_runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
+    const back = queueHref(adminLocation().filterHomework);
+    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="${back}">Очередь</a></p><div class="student-detail-heading"><div><h2>${escapeHtml(student.full_name)}</h2><span>${escapeHtml(student.username)} · аккаунт с ${formatDate(student.created_at)}</span></div><button class="secondary" id="reset-student-password" type="button">Сбросить пароль</button></div><div class="temporary-password" id="temporary-password"></div></section>${detail.homeworks.map((homework) => {
+      const tasks = Object.values(homework.tasks);
+      const hwRaw = tasks.reduce((sum, task) => sum + Number(task.score || 0), 0);
+      const hwFinal = tasks.reduce((sum, task) => sum + Number(task.final_score || 0), 0);
+      const hwMax = tasks.reduce((sum, task) => sum + Number(task.max_points || 0), 0);
+      return `<section class="admin-section card-surface"><div class="section-heading"><h3>${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</h3>${scorePairMarkup({ raw: hwRaw, final: hwFinal, max: hwMax })}</div><div class="student-task-list">${tasks.map((task) => `<a class="student-task-row" href="${studentHref(studentId, `${encodeURIComponent(homework.id)}/${encodeURIComponent(task.id)}`)}"><span class="task-nav-index">${escapeHtml(task.id)}</span><span>${escapeHtml(task.title || task.id)}</span>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'plain' })}</a>`).join('')}</div><form class="deadline-form"><input type="hidden" name="student_id" value="${escapeHtml(studentId)}"><input type="hidden" name="homework" value="${escapeHtml(homework.id)}"><label class="field">Открыть проверку после жёсткого срока<input name="comment" required minlength="3" maxlength="2000" placeholder="Основание"></label><button class="secondary" type="submit">Открыть проверку</button><p class="notice" data-override-result></p></form></section>`;
+    }).join('')}<section class="admin-section card-surface"><h3>Песочница</h3><div class="attempt-list">${detail.sandbox_runs.length ? detail.sandbox_runs.map((run, index) => runMarkup(run, detail.sandbox_runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
     document.querySelector('#reset-student-password').addEventListener('click', () => resetStudentPassword(studentId, student.username));
     target.querySelectorAll('.deadline-form').forEach((form) => form.addEventListener('submit', overrideDeadline));
   } catch (error) {
@@ -1088,8 +1188,8 @@ async function renderAdminTask(target, routeInfo) {
     const homework = detail.homeworks.find((item) => item.id === routeInfo.homework);
     const task = homework ? Object.values(homework.tasks).find((item) => item.id === routeInfo.task) : null;
     if (!task) throw new Error('Задача не найдена');
-    const tone = scoreTone(task.score, task.max_points);
-    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="#admin">Очередь</a><span>/</span><a href="#admin/student/${routeInfo.studentId}">${escapeHtml(student.full_name)}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2><strong class="score-figure ${tone}">${formatPoints(task.score || 0)} / ${formatPoints(task.max_points || 0)}</strong></div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="primary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
+    const back = queueHref(routeInfo.filterHomework);
+    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="${back}">Очередь</a><span>/</span><a href="${studentHref(routeInfo.studentId)}">${escapeHtml(student.full_name)}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'featured' })}</div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="primary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
     document.querySelector('#task-grade-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -1127,8 +1227,8 @@ async function resetStudentPassword(studentId, username) {
   });
 }
 
-function homeworkSelectMarkup(manifest, id, includeAll = false) {
-  const homeworks = Array.isArray(manifest?.homeworks) ? manifest.homeworks : [];
+function homeworkSelectMarkup(source, id, includeAll = false) {
+  const homeworks = Array.isArray(source) ? source : (Array.isArray(source?.homeworks) ? source.homeworks : []);
   const options = [
     includeAll ? '<option value="">Все домашние задания</option>' : '',
     ...homeworks.map((homework) => `<option value="${escapeHtml(homework.id)}">${escapeHtml(String(homework.id || '').toUpperCase())}${homework.title ? ` · ${escapeHtml(homework.title)}` : ''}</option>`),
@@ -1139,11 +1239,14 @@ function homeworkSelectMarkup(manifest, id, includeAll = false) {
 async function renderAdminExport(target) {
   target.innerHTML = loadingPanel('Выгрузки');
   try {
-    const manifestData = await adminApi('/api/admin/manifest');
-    target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Выгрузки</h2></div><p class="muted">Полная ведомость: логин, имя, балл по каждой задаче и сумма для одного домашнего задания.</p><form class="admin-inline" id="export-form"><label class="field">Домашнее задание${homeworkSelectMarkup(manifestData.manifest, 'export-hw')}</label><button class="primary" type="submit">Скачать ведомость</button></form><div class="admin-actions export-all"><button id="export-course" class="secondary" type="button">Выгрузить всё</button><span class="muted">Два файла: ведомость всего курса и журнал всех проверок.</span></div><p id="admin-message" class="notice" role="status"></p></section>`;
+    const homeworks = await api('/api/homeworks');
+    target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Выгрузки</h2></div><p class="muted">Ведомость одного домашнего задания: логин, имя, балл со штрафом по каждой задаче и сумма.</p><form class="admin-inline" id="export-form"><label class="field">Домашнее задание${homeworkSelectMarkup(homeworks, 'export-hw')}</label><button class="primary" type="submit">Скачать ведомость</button></form><details class="admin-fold"><summary>Другие файлы по этому заданию</summary><div class="admin-actions"><button class="secondary" type="button" data-export="results">Сырые баллы</button><button class="secondary" type="button" data-export="results_milestones">Достижения</button><button class="secondary" type="button" data-export="results_details">Детализация</button></div></details><div class="admin-actions export-all"><button id="export-course" class="secondary" type="button">Выгрузить всё</button><span class="muted">Два файла: ведомость всего курса и журнал всех проверок.</span></div><p id="admin-message" class="notice" role="status"></p></section>`;
     document.querySelector('#export-form').addEventListener('submit', (event) => {
       event.preventDefault();
-      downloadCsv('results');
+      downloadCsv('results_final');
+    });
+    target.querySelectorAll('[data-export]').forEach((button) => {
+      button.addEventListener('click', () => downloadCsv(button.dataset.export));
     });
     document.querySelector('#export-course').addEventListener('click', downloadCourseBundle);
   } catch (error) {
@@ -1263,23 +1366,6 @@ function showManifestResult(text, asCode) {
   result.textContent = text;
 }
 
-async function loadStudents() {
-  const query = new URLSearchParams();
-  for (const [elementId, key] of [['filter-search', 'search'], ['filter-hw', 'homework'], ['filter-task', 'task'], ['filter-min', 'min_score'], ['filter-max', 'max_score'], ['filter-status', 'status'], ['filter-sort', 'sort']]) {
-    const value = document.querySelector(`#${elementId}`)?.value;
-    if (value) query.set(key, value);
-  }
-  try {
-    const students = await adminApi(`/api/admin/students?${query}`);
-    const statusLabels = { not_started: 'Нет попыток', complete: 'Выполнено', partial: 'Частично', zero: '0 баллов' };
-    document.querySelector('#student-list').innerHTML = `<div class="admin-table-scroll"><table class="admin-table"><thead><tr><th>ID</th><th>Студент</th><th>Баллы</th><th>Статус</th><th>Карточка</th></tr></thead><tbody>${students.map((student) => {
-      const tone = student.status === 'complete' ? 'is-complete' : student.status === 'partial' ? 'is-partial' : 'is-zero';
-      return `<tr><td>${student.id}</td><td><strong>${escapeHtml(student.full_name)}</strong><small>${escapeHtml(student.username)}</small></td><td class="score-figure ${tone}">${formatPoints(student.score)}</td><td><span class="status-pill ${tone}">${statusLabels[student.status] || escapeHtml(student.status)}</span></td><td><button class="secondary compact student-detail-toggle" data-id="${student.id}">Открыть</button></td></tr><tr id="student-detail-${student.id}" class="hidden"><td colspan="5"></td></tr>`;
-    }).join('')}</tbody></table></div>`;
-    document.querySelectorAll('.student-detail-toggle').forEach((button) => button.addEventListener('click', () => studentDetail(button.dataset.id)));
-  } catch (error) { document.querySelector('#student-list').textContent = error.message; }
-}
-
 const auditActionTitles = {
   register: 'Регистрация', login: 'Вход', login_failed: 'Ошибка входа', logout: 'Выход',
   admin_login: 'Вход преподавателя', admin_login_failed: 'Ошибка входа преподавателя',
@@ -1319,7 +1405,7 @@ const auditValueTitles = {
   blocked: 'Заблокирован', rejected: 'Отклонён', OK: 'Верно', STRUCT: 'Частично',
   WRONG: 'Неверно', SYNTAX: 'Ошибка синтаксиса', ERROR: 'Ошибка выполнения',
   HARD_LATE: 'Жёсткий срок истёк', MANUAL: 'Ручная оценка', results: 'Ведомость',
-  results_milestones: 'Достижения', results_details: 'Детализация',
+  results_final: 'Ведомость со штрафом', results_milestones: 'Достижения', results_details: 'Детализация',
   gradebook: 'Ведомость курса', journal: 'Журнал проверок',
   current_password_mismatch: 'Текущий пароль не подошёл', username_taken: 'Логин уже занят',
   points_out_of_range: 'Баллы вне допустимого диапазона', invalid_comment: 'Некорректная причина',
@@ -1419,65 +1505,6 @@ function paintRoles() {
   }));
 }
 
-async function studentDetail(studentId) {
-  const row = document.querySelector(`#student-detail-${studentId}`);
-  const cell = row.querySelector('td');
-  if (!row.classList.contains('hidden') && row.dataset.loaded === 'true') {
-    row.classList.add('hidden');
-    return;
-  }
-  row.classList.remove('hidden');
-  cell.innerHTML = '<div class="skeleton-stack" aria-busy="true"><span></span><span></span></div>';
-  try {
-    const detail = await adminApi(`/api/admin/students/${studentId}`);
-    const student = detail.student;
-    cell.innerHTML = `<div class="student-detail"><div class="student-detail-heading"><div><strong>${escapeHtml(student.full_name)}</strong><span>${escapeHtml(student.username)} · аккаунт с ${formatDate(student.created_at)}</span></div><button class="secondary reset-student-password" data-id="${studentId}">Сбросить пароль</button></div><div class="temporary-password" id="temporary-password-${studentId}"></div>${detail.homeworks.map((homework) => `<details class="student-homework"><summary>${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</summary><div>${Object.values(homework.tasks).map((task) => `<details class="student-task"><summary>${escapeHtml(task.id)} · ${escapeHtml(task.title)} <span class="${Number(task.score) > 0 ? '' : 'is-zero'}">${task.score ?? '0'}${task.max_points ? ` / ${task.max_points}` : ''}</span></summary><div class="student-task-detail"><form class="manual-grade-form" data-student="${studentId}" data-homework="${escapeHtml(homework.id)}" data-task="${escapeHtml(task.id)}"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Причина ручной оценки" required></label><button class="secondary">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}<h4>Проверки</h4><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div><h4>Запуски</h4><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></div></details>`).join('')}</div></details>`).join('')}<details class="student-homework"><summary>Песочница</summary><div class="attempt-list">${detail.sandbox_runs.map((run, index) => runMarkup(run, detail.sandbox_runs.length - index)).join('') || '<p class="muted">Запусков пока нет.</p>'}</div></details><details class="student-homework"><summary>Действия по студенту (${detail.audit_count})</summary><div class="attempt-list student-audit-events">${detail.audit.map((event) => auditEventMarkup(event)).join('') || '<p class="muted">Событий пока нет.</p>'}</div>${detail.audit_has_more ? '<button type="button" class="secondary compact student-audit-more">Более ранние действия</button>' : ''}</details></div>`;
-    let studentAuditOffset = detail.audit.length;
-    cell.querySelector('.student-audit-more')?.addEventListener('click', async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        const older = await adminApi(`/api/admin/students/${studentId}/history?offset=${studentAuditOffset}&limit=100`);
-        cell.querySelector('.student-audit-events').insertAdjacentHTML('beforeend', older.map((item) => auditEventMarkup(item)).join(''));
-        studentAuditOffset += older.length;
-        if (older.length < 100 || studentAuditOffset >= detail.audit_count) button.remove();
-        else button.disabled = false;
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = error.message;
-      }
-    });
-    row.dataset.loaded = 'true';
-    cell.querySelector('.reset-student-password').addEventListener('click', async () => {
-      const accepted = await askConfirm({
-        title: `Сбросить пароль для ${student.username}?`,
-        text: 'Будет создан новый пароль. Текущие сессии этой учётной записи завершатся.',
-        confirmLabel: 'Сбросить пароль',
-        destructive: true,
-      });
-      if (!accepted) return;
-      const result = await adminApi(`/api/admin/students/${studentId}/reset-password`, { method: 'POST' });
-      const target = document.querySelector(`#temporary-password-${studentId}`);
-      target.innerHTML = `<label>Новый временный пароль<input readonly value="${escapeHtml(result.temporary_password)}"></label><button type="button" class="secondary copy-temp-password">Копировать пароль</button><span role="status"></span>`;
-      target.querySelector('.copy-temp-password').addEventListener('click', async () => {
-        const input = target.querySelector('input');
-        try { await navigator.clipboard.writeText(input.value); }
-        catch { input.select(); document.execCommand('copy'); }
-        target.querySelector('[role="status"]').textContent = 'Скопировано';
-      });
-    });
-    cell.querySelectorAll('.manual-grade-form').forEach((form) => form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const values = Object.fromEntries(new FormData(form));
-      try {
-        await adminApi(`/api/admin/students/${studentId}/manual-grade/${encodeURIComponent(form.dataset.homework)}`, { method: 'POST', body: JSON.stringify({ task: form.dataset.task, points: values.points, comment: values.comment }) });
-        await loadStudents();
-        await studentDetail(studentId);
-      } catch (error) { alert(error.message); }
-    }));
-  } catch (error) { cell.textContent = error.message; }
-}
-
 async function overrideDeadline(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1529,7 +1556,13 @@ async function downloadCsv(kind) {
   try {
     const homework = document.querySelector('#export-hw').value;
     if (!homework) throw new Error('Выберите домашнее задание');
-    await saveCsv(`/api/admin/export/${encodeURIComponent(homework)}/${kind}.csv`, `ведомость-${homework}.csv`);
+    const filenames = {
+      results_final: `ведомость-${homework}.csv`,
+      results: `сырые-${homework}.csv`,
+      results_milestones: `вехи-${homework}.csv`,
+      results_details: `детализация-${homework}.csv`,
+    };
+    await saveCsv(`/api/admin/export/${encodeURIComponent(homework)}/${kind}.csv`, filenames[kind] || `ведомость-${homework}.csv`);
     if (message) { message.className = 'notice'; message.textContent = ''; }
   } catch (error) {
     if (message) { message.className = 'notice error-notice'; message.textContent = error.message; }
