@@ -4,6 +4,8 @@ let token = localStorage.getItem('cabinet_token');
 let authMode = 'login';
 let currentUser = null;
 let usernameCheckTimer;
+let rosterSearchTimer;
+let rosterRequestId = 0;
 const draftTimers = new Map();
 const pendingDrafts = new Map();
 const draftWrites = new Map();
@@ -327,7 +329,7 @@ function adminLocation() {
   const path = queryIndex === -1 ? raw : raw.slice(0, queryIndex);
   const query = new URLSearchParams(queryIndex === -1 ? '' : raw.slice(queryIndex + 1));
   const parts = path.replace(/^admin\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
-  return { path, parts, query, filterHomework: query.get('homework') || '' };
+  return { path, parts, query };
 }
 
 function isAdminHash() {
@@ -335,8 +337,25 @@ function isAdminHash() {
   return path === 'admin' || path.startsWith('admin/');
 }
 
-function queueHref(homework) {
-  return homework ? `#admin?homework=${encodeURIComponent(homework)}` : '#admin';
+function rosterQueryString() {
+  const query = adminLocation().query;
+  const next = new URLSearchParams();
+  const offset = Number(query.get('offset') || 0);
+  const search = query.get('q') || '';
+  if (offset > 0) next.set('offset', String(offset));
+  if (search) next.set('q', search);
+  const encoded = next.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
+function rosterHref({ offset, q } = {}) {
+  const query = new URLSearchParams();
+  const nextOffset = offset ?? Number(adminLocation().query.get('offset') || 0);
+  const search = q ?? adminLocation().query.get('q') ?? '';
+  if (Number(nextOffset) > 0) query.set('offset', String(nextOffset));
+  if (search) query.set('q', search);
+  const encoded = query.toString();
+  return encoded ? `#admin?${encoded}` : '#admin';
 }
 
 function scorePairLabel(rawValue, finalValue, maxValue, penalized) {
@@ -1065,30 +1084,31 @@ async function adminApi(path, options = {}) {
   return body;
 }
 
-let queueStudents = [];
-
 function adminIsSuper() {
   return Boolean(currentUser?.is_superadmin);
 }
 
 function parseAdminRoute() {
-  const { parts, filterHomework } = adminLocation();
+  const { parts } = adminLocation();
   if (parts[0] === 'student' && parts.length >= 4) {
-    return { screen: 'task', studentId: parts[1], homework: parts[2], task: parts[3], filterHomework };
+    return { screen: 'task', studentId: parts[1], homework: parts[2], task: parts[3] };
   }
-  if (parts[0] === 'student' && parts[1]) return { screen: 'student', studentId: parts[1], filterHomework };
-  if (['export', 'course', 'audit', 'accounts'].includes(parts[0])) return { screen: parts[0], filterHomework };
-  return { screen: 'queue', filterHomework };
+  if (parts[0] === 'student' && parts.length === 3) {
+    return { screen: 'homework', studentId: parts[1], homework: parts[2] };
+  }
+  if (parts[0] === 'student' && parts[1]) return { screen: 'student', studentId: parts[1] };
+  if (['export', 'course', 'audit', 'accounts'].includes(parts[0])) return { screen: parts[0] };
+  return { screen: 'roster' };
 }
 
-function studentHref(studentId, extra = '', filterHomework = adminLocation().filterHomework) {
+function studentHref(studentId, extra = '') {
   const path = extra ? `#admin/student/${studentId}/${extra}` : `#admin/student/${studentId}`;
-  return filterHomework ? `${path}?homework=${encodeURIComponent(filterHomework)}` : path;
+  return path + rosterQueryString();
 }
 
 function adminNav(active) {
   const items = [
-    ['queue', 'Очередь', '#admin'],
+    ['roster', 'Ведомость', rosterHref()],
     ['export', 'Выгрузки', '#admin/export'],
   ];
   if (adminIsSuper()) {
@@ -1102,81 +1122,149 @@ function adminNav(active) {
 }
 
 async function renderAdminApp() {
+  clearTimeout(rosterSearchTimer);
+  rosterRequestId += 1;
   const routeInfo = parseAdminRoute();
   const restricted = ['course', 'audit', 'accounts'].includes(routeInfo.screen) && !adminIsSuper();
   const screen = restricted ? 'denied' : routeInfo.screen;
-  const navScreen = screen === 'student' || screen === 'task' ? 'queue' : screen;
-  app.innerHTML = `<div class="page-shell admin-page">${adminNav(navScreen)}<div id="admin-screen"></div></div>`;
+  const navScreen = ['student', 'task', 'homework'].includes(screen) ? 'roster' : screen;
+  app.innerHTML = `<div class="page-shell admin-page${screen === 'roster' ? ' is-roster' : ''}">${adminNav(navScreen)}<div id="admin-screen"></div></div>`;
   const target = document.querySelector('#admin-screen');
-  if (screen === 'queue') await renderAdminQueue(target);
+  if (screen === 'roster') await renderAdminRoster(target);
   else if (screen === 'student') await renderAdminStudent(target, routeInfo.studentId);
+  else if (screen === 'homework') await renderAdminStudent(target, routeInfo.studentId, routeInfo.homework);
   else if (screen === 'task') await renderAdminTask(target, routeInfo);
   else if (screen === 'export') await renderAdminExport(target);
   else if (screen === 'course') await renderAdminCourse(target);
   else if (screen === 'audit') renderAdminAudit(target);
   else if (screen === 'accounts') {
     renderAdminAccounts(target);
-  } else target.innerHTML = '<section class="admin-section card-surface"><h2>Этот раздел доступен администратору.</h2><p class="muted">Ассистент работает с очередью и выгрузками.</p><a class="secondary" href="#admin">К очереди</a></section>';
+  } else target.innerHTML = `<section class="admin-section card-surface"><h2>Этот раздел доступен администратору.</h2><p class="muted">Ассистент работает с ведомостью и выгрузками.</p><a class="secondary" href="${rosterHref()}">К ведомости</a></section>`;
 }
 
-async function renderAdminQueue(target) {
-  const filterHomework = adminLocation().filterHomework;
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Очередь</h2><span class="section-count" id="queue-count">…</span></div><p class="muted">Студенты, у которых уже есть проверка, а балл ещё не полный. Поиск находит любого студента, в том числе без попыток.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="queue-search" placeholder="Например, ivan_26"></label><label class="field">Домашнее задание<span id="queue-hw-slot"></span></label></div><div id="queue-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></div></section>`;
-  document.querySelector('#queue-search').addEventListener('input', paintQueue);
+async function renderAdminRoster(target) {
+  const requestId = ++rosterRequestId;
+  const locationState = adminLocation();
+  const search = locationState.query.get('q') || '';
+  const offset = Math.max(0, Number(locationState.query.get('offset') || 0) || 0);
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Ведомость</h2><span class="section-count" id="roster-count">…</span></div><p class="muted">Клетка домашнего задания открывает задачи, имя — всю карточку.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="roster-search" type="search" autocomplete="off" value="${escapeHtml(search)}" placeholder="Например, ivan_26"></label></div><div id="roster-table" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span><span></span></div></div><div class="roster-pager" id="roster-pager"></div></section>`;
+  const searchInput = document.querySelector('#roster-search');
+  searchInput.addEventListener('input', () => {
+    clearTimeout(rosterSearchTimer);
+    rosterSearchTimer = setTimeout(() => {
+      if (parseAdminRoute().screen !== 'roster') return;
+      location.hash = rosterHref({ offset: 0, q: searchInput.value.trim() });
+    }, 280);
+  });
   try {
-    const [homeworks, students] = await Promise.all([
-      api('/api/homeworks'),
-      adminApi(`/api/admin/students?sort=name${filterHomework ? `&homework=${encodeURIComponent(filterHomework)}` : ''}`),
-    ]);
-    document.querySelector('#queue-hw-slot').innerHTML = homeworkSelectMarkup(homeworks, 'queue-hw', true);
-    const select = document.querySelector('#queue-hw');
-    if (select) {
-      select.value = filterHomework;
-      select.addEventListener('change', () => { location.hash = queueHref(select.value); });
+    const params = new URLSearchParams({ sort: 'name', offset: String(offset), limit: '50' });
+    if (search) params.set('search', search);
+    const payload = await adminApi(`/api/admin/students?${params}`);
+    if (requestId !== rosterRequestId) return;
+    const homeworks = payload.homeworks || [];
+    const students = payload.students || [];
+    const total = Number(payload.total || 0);
+    const limit = Number(payload.limit || 50);
+    const pageOffset = Number(payload.offset || 0);
+    const courseMax = homeworks.reduce((sum, homework) => sum + Number(homework.max_points || 0), 0);
+    const count = document.querySelector('#roster-count');
+    if (count) count.textContent = `${total} ${pluralStudents(total)}`;
+    const table = document.querySelector('#roster-table');
+    if (!table) return;
+    table.removeAttribute('aria-busy');
+    if (!students.length) {
+      table.innerHTML = `<p class="muted">${search ? 'Такого студента нет.' : 'Студентов пока нет.'}</p>`;
+    } else {
+      const note = homeworks.length
+        ? ''
+        : '<p class="muted">Курс ещё не опубликован — колонок домашних заданий нет.</p>';
+      table.innerHTML = `${note}<div class="result-table-scroll roster-scroll" role="region" aria-label="Ведомость. Прокручивайте по горизонтали, если домашних заданий много" tabindex="0"><table class="admin-table roster-table"><thead><tr><th scope="col">Студент</th>${homeworks.map((homework) => `<th scope="col">${escapeHtml(String(homework.id || '').toUpperCase())}${homework.title ? `<small>${escapeHtml(homework.title)}</small>` : ''}</th>`).join('')}<th scope="col">Итог</th></tr></thead><tbody>${students.map((student) => {
+        const cells = new Map((student.homeworks || []).map((cell) => [cell.id, cell]));
+        const totalCell = student.status === 'not_started'
+          ? '<span class="roster-total is-empty">–</span>'
+          : `<span class="roster-total">${scorePairMarkup({ raw: student.score, final: student.final_score ?? 0, max: courseMax || undefined, size: 'plain' })}</span>`;
+        return `<tr><th scope="row"><a class="roster-person" href="${studentHref(student.id)}"><strong>${escapeHtml(student.full_name)}</strong><small>${escapeHtml(student.username)}</small></a></th>${homeworks.map((homework) => `<td>${rosterCellMarkup(student.id, cells.get(homework.id))}</td>`).join('')}<td>${totalCell}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
     }
-    queueStudents = students;
-    paintQueue();
+    const pager = document.querySelector('#roster-pager');
+    if (pager && total > limit) {
+      const prevOffset = Math.max(0, pageOffset - limit);
+      const nextOffset = pageOffset + limit;
+      pager.innerHTML = `${pageOffset > 0 ? `<a class="secondary" href="${rosterHref({ offset: prevOffset, q: search })}">Предыдущие</a>` : ''}<span class="muted">${pageOffset + 1}–${Math.min(pageOffset + students.length, total)} из ${total}</span>${nextOffset < total ? `<a class="secondary" href="${rosterHref({ offset: nextOffset, q: search })}">Следующие</a>` : ''}`;
+    }
   } catch (error) {
-    document.querySelector('#queue-list').textContent = error.message;
+    if (requestId !== rosterRequestId) return;
+    const table = document.querySelector('#roster-table');
+    if (!table) return;
+    table.removeAttribute('aria-busy');
+    listError(table, error.message, () => renderAdminRoster(target));
   }
 }
 
-function paintQueue() {
-  const query = document.querySelector('#queue-search')?.value.trim().toLowerCase() || '';
-  const filterHomework = adminLocation().filterHomework;
-  const labels = { not_started: 'Нет попыток', complete: 'Полный балл', partial: 'Частично', zero: '0 баллов' };
-  const rows = queueStudents.filter((student) => {
-    const inQueue = student.status === 'partial' || student.status === 'zero';
-    const matches = !query || `${student.full_name} ${student.username}`.toLowerCase().includes(query);
-    return matches && (query || inQueue);
-  });
-  const count = document.querySelector('#queue-count');
-  if (count) count.textContent = query ? `${rows.length}` : `${rows.length} в очереди`;
-  const list = document.querySelector('#queue-list');
-  if (!list) return;
-  list.innerHTML = rows.length ? `<div class="queue-list">${rows.map((student) => {
-    const tone = student.status === 'complete' ? 'is-complete' : student.status === 'partial' ? 'is-partial' : 'is-zero';
-    return `<a class="queue-row" href="${studentHref(student.id, '', filterHomework)}"><span class="queue-person"><strong>${escapeHtml(student.full_name)}</strong><small>${escapeHtml(student.username)}</small></span>${scorePairMarkup({ raw: student.score, final: student.final_score ?? 0, size: 'plain' })}<span class="status-pill ${tone}">${labels[student.status] || escapeHtml(student.status)}</span></a>`;
-  }).join('')}</div>` : `<p class="muted">${query ? 'Такого студента нет.' : 'Очередь пуста: у всех с попытками уже полный балл.'}</p>`;
+function pluralStudents(count) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'студент';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'студента';
+  return 'студентов';
 }
 
-async function renderAdminStudent(target, studentId) {
-  target.innerHTML = loadingPanel('Карточка');
+function rosterCellMarkup(studentId, cell) {
+  if (!cell) return '<span class="roster-total is-empty">–</span>';
+  const href = studentHref(studentId, encodeURIComponent(cell.id));
+  const homeworkLabel = String(cell.id || '').toUpperCase();
+  if (cell.status === 'not_started') {
+    return `<a class="roster-cell is-empty" href="${href}" aria-label="${escapeHtml(homeworkLabel)}, нет попыток">–</a>`;
+  }
+  return `<a class="roster-cell" href="${href}">${scorePairMarkup({ raw: cell.score, final: cell.final_score ?? 0, max: cell.max_points, size: 'plain' })}</a>`;
+}
+
+function homeworkStanding(homework) {
+  const tasks = Object.values(homework.tasks || {});
+  return {
+    tasks,
+    raw: tasks.reduce((sum, task) => sum + Number(task.score || 0), 0),
+    final: tasks.reduce((sum, task) => sum + Number(task.final_score || 0), 0),
+    max: tasks.reduce((sum, task) => sum + Number(task.max_points || 0), 0),
+  };
+}
+
+function studentHomeworkBodyMarkup(studentId, homework) {
+  const { tasks } = homeworkStanding(homework);
+  return `<div class="student-task-list">${tasks.map((task) => `<a class="student-task-row" href="${studentHref(studentId, `${encodeURIComponent(homework.id)}/${encodeURIComponent(task.id)}`)}"><span class="task-nav-index">${escapeHtml(task.id)}</span><span>${escapeHtml(task.title || task.id)}</span>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'plain' })}</a>`).join('')}</div><form class="deadline-form"><input type="hidden" name="student_id" value="${escapeHtml(studentId)}"><input type="hidden" name="homework" value="${escapeHtml(homework.id)}"><label class="field">Открыть проверку после жёсткого срока<input name="comment" required minlength="3" maxlength="2000" placeholder="Основание"></label><button class="secondary" type="submit">Открыть проверку</button><p class="notice" data-override-result></p></form>`;
+}
+
+function studentHomeworkSectionMarkup(studentId, homework) {
+  const { raw, final, max } = homeworkStanding(homework);
+  return `<section class="admin-section card-surface"><div class="section-heading"><h3>${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</h3>${scorePairMarkup({ raw, final, max })}</div>${studentHomeworkBodyMarkup(studentId, homework)}</section>`;
+}
+
+async function renderAdminStudent(target, studentId, homeworkId = '') {
+  target.innerHTML = loadingPanel(homeworkId ? 'Домашнее задание' : 'Карточка');
   try {
     const detail = await adminApi(`/api/admin/students/${studentId}`);
     const student = detail.student;
-    const back = queueHref(adminLocation().filterHomework);
-    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="${back}">Очередь</a></p><div class="student-detail-heading"><div><h2>${escapeHtml(student.full_name)}</h2><span>${escapeHtml(student.username)} · аккаунт с ${formatDate(student.created_at)}</span></div><button class="secondary" id="reset-student-password" type="button">Сбросить пароль</button></div><div class="temporary-password" id="temporary-password"></div></section>${detail.homeworks.map((homework) => {
-      const tasks = Object.values(homework.tasks);
-      const hwRaw = tasks.reduce((sum, task) => sum + Number(task.score || 0), 0);
-      const hwFinal = tasks.reduce((sum, task) => sum + Number(task.final_score || 0), 0);
-      const hwMax = tasks.reduce((sum, task) => sum + Number(task.max_points || 0), 0);
-      return `<section class="admin-section card-surface"><div class="section-heading"><h3>${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</h3>${scorePairMarkup({ raw: hwRaw, final: hwFinal, max: hwMax })}</div><div class="student-task-list">${tasks.map((task) => `<a class="student-task-row" href="${studentHref(studentId, `${encodeURIComponent(homework.id)}/${encodeURIComponent(task.id)}`)}"><span class="task-nav-index">${escapeHtml(task.id)}</span><span>${escapeHtml(task.title || task.id)}</span>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'plain' })}</a>`).join('')}</div><form class="deadline-form"><input type="hidden" name="student_id" value="${escapeHtml(studentId)}"><input type="hidden" name="homework" value="${escapeHtml(homework.id)}"><label class="field">Открыть проверку после жёсткого срока<input name="comment" required minlength="3" maxlength="2000" placeholder="Основание"></label><button class="secondary" type="submit">Открыть проверку</button><p class="notice" data-override-result></p></form></section>`;
-    }).join('')}<section class="admin-section card-surface"><h3>Песочница</h3><div class="attempt-list">${detail.sandbox_runs.length ? detail.sandbox_runs.map((run, index) => runMarkup(run, detail.sandbox_runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
-    document.querySelector('#reset-student-password').addEventListener('click', () => resetStudentPassword(studentId, student.username));
+    const homeworks = homeworkId
+      ? detail.homeworks.filter((item) => item.id === homeworkId)
+      : detail.homeworks;
+    if (homeworkId && !homeworks.length) throw new Error('Домашнее задание не найдено');
+    const crumb = homeworkId
+      ? `<p class="admin-crumb"><a href="${rosterHref()}">Ведомость</a><span>/</span><a href="${studentHref(studentId)}">${escapeHtml(student.full_name)}</a></p>`
+      : `<p class="admin-crumb"><a href="${rosterHref()}">Ведомость</a></p>`;
+    const slice = homeworkId ? homeworkStanding(homeworks[0]) : null;
+    const heading = homeworkId
+      ? `<div class="student-detail-heading"><div><h2>${escapeHtml(homeworks[0].id.toUpperCase())} · ${escapeHtml(homeworks[0].title)}</h2><span>${escapeHtml(student.full_name)} · ${escapeHtml(student.username)}</span></div>${scorePairMarkup({ raw: slice.raw, final: slice.final, max: slice.max })}</div>`
+      : `<div class="student-detail-heading"><div><h2>${escapeHtml(student.full_name)}</h2><span>${escapeHtml(student.username)} · аккаунт с ${formatDate(student.created_at)}</span></div><button class="secondary" id="reset-student-password" type="button">Сбросить пароль</button></div><div class="temporary-password" id="temporary-password"></div>`;
+    const sandbox = homeworkId
+      ? ''
+      : `<section class="admin-section card-surface"><h3>Песочница</h3><div class="attempt-list">${detail.sandbox_runs.length ? detail.sandbox_runs.map((run, index) => runMarkup(run, detail.sandbox_runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
+    target.innerHTML = homeworkId
+      ? `<section class="admin-section card-surface">${crumb}${heading}${studentHomeworkBodyMarkup(studentId, homeworks[0])}</section>`
+      : `<section class="admin-section card-surface">${crumb}${heading}</section>${homeworks.map((homework) => studentHomeworkSectionMarkup(studentId, homework)).join('')}${sandbox}`;
+    document.querySelector('#reset-student-password')?.addEventListener('click', () => resetStudentPassword(studentId, student.username));
     target.querySelectorAll('.deadline-form').forEach((form) => form.addEventListener('submit', overrideDeadline));
   } catch (error) {
-    showAdminError(target, 'Не удалось открыть карточку', error);
+    showAdminError(target, homeworkId ? 'Не удалось открыть домашнее задание' : 'Не удалось открыть карточку', error);
   }
 }
 
@@ -1188,8 +1276,7 @@ async function renderAdminTask(target, routeInfo) {
     const homework = detail.homeworks.find((item) => item.id === routeInfo.homework);
     const task = homework ? Object.values(homework.tasks).find((item) => item.id === routeInfo.task) : null;
     if (!task) throw new Error('Задача не найдена');
-    const back = queueHref(routeInfo.filterHomework);
-    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="${back}">Очередь</a><span>/</span><a href="${studentHref(routeInfo.studentId)}">${escapeHtml(student.full_name)}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'featured' })}</div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="primary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
+    target.innerHTML = `<section class="admin-section card-surface"><p class="admin-crumb"><a href="${rosterHref()}">Ведомость</a><span>/</span><a href="${studentHref(routeInfo.studentId)}">${escapeHtml(student.full_name)}</a><span>/</span><a href="${studentHref(routeInfo.studentId, encodeURIComponent(homework.id))}">${escapeHtml(homework.id.toUpperCase())}</a></p><div class="section-heading"><h2>${escapeHtml(task.id)} · ${escapeHtml(task.title || task.id)}</h2>${scorePairMarkup({ raw: task.score || 0, final: task.final_score ?? 0, max: task.max_points || 0, size: 'featured' })}</div><p class="muted">${escapeHtml(homework.id.toUpperCase())} · ${escapeHtml(homework.title)}</p><form class="manual-grade-form" id="task-grade-form"><label>Баллы<input name="points" type="number" min="0" max="${escapeHtml(task.max_points || '100')}" step="0.01" value="${escapeHtml(task.score || '0')}" required></label><label>Комментарий<input name="comment" minlength="3" maxlength="2000" placeholder="Почему оценка поставлена вручную" required></label><button class="primary" type="submit">Сохранить оценку</button></form>${task.manual_grades.map((grade) => `<p class="manual-grade-entry">Ручная оценка ${escapeHtml(grade.points)} · ${formatDate(grade.created_at)} · ${escapeHtml(grade.actor)}<br>${escapeHtml(grade.comment)}</p>`).join('')}</section><section class="admin-section card-surface"><h3>Проверки</h3><div class="attempt-list">${task.attempts.length ? task.attempts.map((attempt, index) => attemptMarkup(attempt, task.attempts.length - index)).join('') : '<p class="muted">Проверок пока нет.</p>'}</div></section><section class="admin-section card-surface"><h3>Запуски</h3><div class="attempt-list">${task.runs.length ? task.runs.map((run, index) => runMarkup(run, task.runs.length - index)).join('') : '<p class="muted">Запусков пока нет.</p>'}</div></section>`;
     document.querySelector('#task-grade-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -1299,7 +1386,7 @@ function renderAdminAudit(target) {
 }
 
 function renderAdminAccounts(target) {
-  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Права</h2></div><p class="muted">Одна учётка на человека. Ассистент проверяет очередь, ставит оценку и скачивает ведомость. Администратор ещё публикует курс, видит журнал и выдаёт права.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="role-search" placeholder="Например, ivan_26"></label></div><div id="admin-account-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span></div></div></section>`;
+  target.innerHTML = `<section class="admin-section card-surface"><div class="section-heading"><h2>Права</h2></div><p class="muted">Одна учётка на человека. Ассистент смотрит ведомость, ставит оценку и скачивает выгрузки. Администратор ещё публикует курс, видит журнал и выдаёт права.</p><div class="admin-toolbar"><label class="field">Имя или логин<input id="role-search" placeholder="Например, ivan_26"></label></div><div id="admin-account-list" aria-busy="true"><div class="skeleton-stack" aria-hidden="true"><span></span><span></span></div></div></section>`;
   document.querySelector('#role-search').addEventListener('input', paintRoles);
   loadRoles();
 }

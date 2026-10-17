@@ -303,6 +303,25 @@ def publish(data: PublishInput, actor: str = Depends(super_admin)):
     return {"version": cur.lastrowid, "homework_count": len(manifest.homeworks)}
 
 
+def _task_standing(student_id, assigned, scores, finals, active):
+    score = sum((scores.get((student_id, h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0))
+    adjusted = sum(
+        (finals.get((student_id, h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0)
+    )
+    has_activity = any((student_id, h, t) in active for h, t, _ in assigned)
+    if not has_activity:
+        standing = "not_started"
+    elif assigned and all(
+        scores.get((student_id, h, t), Decimal(0)) >= maximum for h, t, maximum in assigned
+    ):
+        standing = "complete"
+    elif score > 0:
+        standing = "partial"
+    else:
+        standing = "zero"
+    return score, adjusted, standing
+
+
 @admin_router.get("/students")
 def admin_students(
     _: str = Depends(admin),
@@ -313,19 +332,35 @@ def admin_students(
     status: str | None = None,
     search: str | None = None,
     sort: str = "name",
+    offset: int = 0,
+    limit: int = 50,
 ):
     valid_statuses = {None, "not_started", "complete", "partial", "zero"}
     if status not in valid_statuses:
         raise HTTPException(422, "status must be not_started, complete, partial or zero")
     if sort not in {"name", "username", "score", "status"}:
         raise HTTPException(422, "Unsupported sort field")
+    offset = max(0, offset)
+    limit = min(max(1, limit), 200)
     target_tasks = []
     manifest = None
     homework_soft = {}
+    catalog = []
+    homework_tasks: dict[str, list[tuple[str, str, Decimal]]] = {}
     try:
         _, manifest, _ = active_manifest()
         homework_soft = {hw.id: hw.soft_deadline for hw in manifest.homeworks}
         for hw in manifest.homeworks:
+            max_points = sum((item.points for item in hw.tasks), Decimal(0))
+            catalog.append(
+                {
+                    "id": hw.id,
+                    "title": hw.title,
+                    "max_points": str(max_points),
+                    "order": hw.order,
+                }
+            )
+            homework_tasks[hw.id] = [(hw.id, item.id, item.points) for item in hw.tasks]
             if homework and hw.id != homework:
                 continue
             for item in hw.tasks:
@@ -379,29 +414,29 @@ def admin_students(
             assigned = target_tasks
             if not assigned and not homework and not task:
                 assigned = sorted({(h, t, Decimal(0)) for sid, h, t in scores if sid == s["id"]})
-            score = sum(
-                (scores.get((s["id"], h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0)
+            score, adjusted, student_status = _task_standing(
+                s["id"], assigned, scores, finals, active
             )
-            adjusted = sum(
-                (finals.get((s["id"], h, t), Decimal(0)) for h, t, _ in assigned), Decimal(0)
-            )
-            has_activity = any((s["id"], h, t) in active for h, t, _ in assigned)
-            if not has_activity:
-                student_status = "not_started"
-            elif assigned and all(
-                scores.get((s["id"], h, t), Decimal(0)) >= maximum for h, t, maximum in assigned
-            ):
-                student_status = "complete"
-            elif score > 0:
-                student_status = "partial"
-            else:
-                student_status = "zero"
             if status and student_status != status:
                 continue
             if (min_score is not None and score < Decimal(str(min_score))) or (
                 max_score is not None and score > Decimal(str(max_score))
             ):
                 continue
+            cells = []
+            for item in catalog:
+                raw, penalized, cell_status = _task_standing(
+                    s["id"], homework_tasks[item["id"]], scores, finals, active
+                )
+                cells.append(
+                    {
+                        "id": item["id"],
+                        "score": str(raw),
+                        "final_score": public_points(penalized),
+                        "max_points": item["max_points"],
+                        "status": cell_status,
+                    }
+                )
             result.append(
                 {
                     "id": s["id"],
@@ -410,6 +445,7 @@ def admin_students(
                     "score": str(score),
                     "final_score": public_points(adjusted),
                     "status": student_status,
+                    "homeworks": cells,
                 }
             )
     if sort == "score":
@@ -417,7 +453,16 @@ def admin_students(
     else:
         key = "username" if sort == "username" else "status" if sort == "status" else "full_name"
         result.sort(key=lambda item: item[key].casefold())
-    return result
+    total = len(result)
+    if offset >= total and total:
+        offset = (total - 1) // limit * limit
+    return {
+        "homeworks": catalog,
+        "students": result[offset : offset + limit],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @admin_router.get("/students/{student_id}/history")

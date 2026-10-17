@@ -51,10 +51,12 @@ MANIFEST = {
 }
 
 
-def _client(tmp_path, monkeypatch):
+def _client(tmp_path, monkeypatch, manifest=None):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "cabinet.sqlite3")
     monkeypatch.setattr(api, "MANIFEST_FILE", tmp_path / "manifest.json")
-    (tmp_path / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(manifest or MANIFEST), encoding="utf-8"
+    )
     monkeypatch.setenv("CABINET_ADMIN_TOKEN", "test-teacher-token")
     monkeypatch.setattr(
         api,
@@ -155,19 +157,21 @@ def test_admin_queue_and_final_export(tmp_path, monkeypatch):
         listed = client.get(
             "/api/admin/students", headers=teacher, params={"homework": "hw1"}
         ).json()
-        row = next(item for item in listed if item["id"] == student_id)
+        row = next(item for item in listed["students"] if item["id"] == student_id)
         assert Decimal(row["score"]) == Decimal("1.5")
         assert Decimal(row["final_score"]) == Decimal("1.40")
         assert row["status"] == "partial"
+        assert [item["id"] for item in listed["homeworks"]] == ["hw1"]
+        assert [cell["id"] for cell in row["homeworks"]] == ["hw1"]
 
         complete = client.get(
             "/api/admin/students",
             headers=teacher,
             params={"homework": "hw1", "task": "Q01", "status": "complete"},
         ).json()
-        assert complete[0]["id"] == student_id
-        assert complete[0]["score"] == "1"
-        assert Decimal(complete[0]["final_score"]) == Decimal("1")
+        assert complete["students"][0]["id"] == student_id
+        assert complete["students"][0]["score"] == "1"
+        assert Decimal(complete["students"][0]["final_score"]) == Decimal("1")
 
         raw = client.get("/api/admin/export/hw1/results.csv", headers=teacher)
         final = client.get("/api/admin/export/hw1/results_final.csv", headers=teacher)
@@ -201,3 +205,81 @@ def test_admin_queue_and_final_export(tmp_path, monkeypatch):
             ).status_code
             == 200
         )
+
+
+def test_gradebook_cells_follow_manifest_and_paginate(tmp_path, monkeypatch):
+    course = json.loads(json.dumps(MANIFEST))
+    course["homeworks"].append(
+        {
+            "id": "hw2",
+            "title": "ДЗ 2",
+            "order": 2,
+            "soft_deadline": "2026-01-01T00:00:00+03:00",
+            "hard_deadline": "2099-12-31T23:59:00+03:00",
+            "tasks": [
+                {
+                    "id": "Q01",
+                    "title": "Task",
+                    "statement": "Select one.",
+                    "points": 1,
+                    "required": [],
+                    "hints": [],
+                    "reference_sql": "SELECT 1 AS answer",
+                }
+            ],
+        }
+    )
+    with _client(tmp_path, monkeypatch, course) as client:
+        teacher = {"X-Admin-Token": "test-teacher-token"}
+        first_id = _register(client, "alpha_26")[1]
+        _register(client, "beta_26")
+        _add_achievement(first_id, "hw1", "Q01", "1", "2026-01-01T00:00:00+03:00")
+
+        listed = client.get("/api/admin/students", headers=teacher, params={"sort": "username"}).json()
+        assert [item["id"] for item in listed["homeworks"]] == ["hw1", "hw2"]
+        assert listed["total"] == 2
+        assert listed["offset"] == 0
+        assert listed["limit"] == 50
+        row = next(item for item in listed["students"] if item["id"] == first_id)
+        assert [cell["id"] for cell in row["homeworks"]] == ["hw1", "hw2"]
+        assert row["homeworks"][0]["status"] == "partial"
+        assert row["homeworks"][1]["status"] == "not_started"
+
+        page = client.get(
+            "/api/admin/students", headers=teacher, params={"sort": "username", "limit": 1, "offset": 0}
+        ).json()
+        assert page["total"] == 2
+        assert len(page["students"]) == 1
+        rest = client.get(
+            "/api/admin/students", headers=teacher, params={"sort": "username", "limit": 1, "offset": 1}
+        ).json()
+        assert rest["students"][0]["id"] != page["students"][0]["id"]
+
+        scoped = client.get(
+            "/api/admin/students",
+            headers=teacher,
+            params={"homework": "hw1", "sort": "username"},
+        ).json()
+        assert [item["id"] for item in scoped["homeworks"]] == ["hw1", "hw2"]
+        scoped_row = next(item for item in scoped["students"] if item["id"] == first_id)
+        assert [cell["id"] for cell in scoped_row["homeworks"]] == ["hw1", "hw2"]
+        assert Decimal(scoped_row["score"]) == Decimal("1")
+        assert scoped_row["homeworks"][1]["status"] == "not_started"
+
+        past = client.get(
+            "/api/admin/students",
+            headers=teacher,
+            params={"sort": "username", "limit": 1, "offset": 99},
+        ).json()
+        assert past["total"] == 2
+        assert past["offset"] == 1
+        assert len(past["students"]) == 1
+
+        missing = client.get(
+            "/api/admin/students",
+            headers=teacher,
+            params={"search": "zzz_no_such_student", "offset": 10},
+        ).json()
+        assert missing["total"] == 0
+        assert missing["offset"] == 10
+        assert missing["students"] == []

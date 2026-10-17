@@ -76,12 +76,29 @@ test('Score pair and admin hash helpers are wired without dead student table', (
   assert.doesNotMatch(styleCss, /\.homework-score\s*\{[^}]*color:\s*var\(--accent\)/);
 });
 
-test('Queue and export load homework lists from coursework API', () => {
-  const queue = sliceFn(appJs, 'async function renderAdminQueue', 'function paintQueue');
+test('Roster and export load homework lists from coursework API', () => {
+  const roster = sliceFn(appJs, 'async function renderAdminRoster', 'function pluralStudents');
   const exported = sliceFn(appJs, 'async function renderAdminExport', 'async function renderAdminCourse');
-  assert.match(queue, /\/api\/homeworks/);
+  assert.match(appJs, /function rosterHref\(/);
+  assert.match(appJs, /function rosterQueryString\(/);
+  assert.match(appJs, /return path \+ rosterQueryString\(\)/);
+  assert.match(appJs, /roster-table/);
+  assert.match(appJs, /parts.length === 3/);
+  assert.match(roster, /\/api\/admin\/students/);
+  assert.match(roster, /limit: '50'/);
+  assert.match(roster, /payload\.offset/);
+  assert.match(roster, /parseAdminRoute\(\)\.screen !== 'roster'/);
+  assert.match(roster, /requestId !== rosterRequestId/);
+  assert.match(roster, /listError\(/);
+  assert.match(roster, /Предыдущие/);
+  assert.match(appJs, /is-roster/);
+  assert.match(styleCss, /\.admin-page\.is-roster/);
+  assert.doesNotMatch(roster, /\/api\/homeworks/);
+  assert.doesNotMatch(appJs, /student.status === 'partial' \|\| student.status === 'zero'/);
+  assert.doesNotMatch(appJs, /async function renderAdminQueue/);
+  assert.doesNotMatch(appJs, /filterHomework/);
+  assert.match(appJs, /\['roster', 'Ведомость', rosterHref\(\)\]/);
   assert.match(exported, /\/api\/homeworks/);
-  assert.doesNotMatch(queue, /\/api\/admin\/manifest/);
   assert.doesNotMatch(exported, /\/api\/admin\/manifest/);
   assert.match(appJs, /\/api\/admin\/manifest/);
 });

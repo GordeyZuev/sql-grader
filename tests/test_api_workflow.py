@@ -426,7 +426,7 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
             headers=teacher_headers,
             params={"homework": homework, "status": "partial"},
         )
-        assert filtered.status_code == 200 and filtered.json()[0]["status"] == "partial"
+        assert filtered.status_code == 200 and filtered.json()["students"][0]["status"] == "partial"
 
         sandbox = client.post(
             "/api/run", headers=student_headers, json={"sql": "SELECT 1 AS answer"}
@@ -509,7 +509,7 @@ def test_student_teacher_workflow_and_exports(tmp_path, monkeypatch):
             headers=teacher_headers,
             params={"homework": homework, "task": task, "status": "complete"},
         )
-        assert corrected_filter.json()[0]["score"] == "1"
+        assert corrected_filter.json()["students"][0]["score"] == "1"
         history = client.get(
             f"/api/admin/students/{student_id}/history", headers=teacher_headers
         ).json()
